@@ -1143,18 +1143,513 @@ static int flank_defense_total(const Position& pos) {
     return v;
 }
 
+// King danger: main king safety score combining all factors
+// Returns 0 if danger <= 100 (not enough threat)
+static int king_danger(const Position& pos) {
+    int count   = king_attackers_count_total(pos);
+    int weight  = king_attackers_weight_total(pos);
+    int kAttacks = king_attacks_total(pos);
+    int weak    = weak_bonus_total(pos);
+    int unsafeCk = unsafe_checks_total(pos);
+    int blockers = blockers_for_king_total(pos);
+    int flankAtt = flank_attack_total(pos);
+    int flankDef = flank_defense_total(pos);
+
+    // No queen penalty
+    int noQueen = 1; // TODO: queen_count(pos, WHITE) > 0 ? 0 : 1
+    for (int sq = 0; sq < 64; sq++)
+        if (pos.piece_on(Square(sq)) == W_QUEEN) { noQueen = 0; break; }
+
+    // Knight defender for enemy (black has knight defending king)
+    int knightDef = 0;  // TODO: knight_defender from black perspective
+    // Simplified: check if black has knight near black king
+    int bkx = -1, bky = -1;
+    for (int sq = 0; sq < 64; sq++)
+        if (pos.piece_on(Square(sq)) == B_KING) {
+            bkx = file_of(Square(sq)); bky = rank_of(Square(sq)); break;
+        }
+    if (bkx >= 0) {
+        static const int kdx[] = {-2, -1, 1, 2, 2, 1, -1, -2};
+        static const int kdy[] = {-1, -2, -2, -1, 1, 2, 2, 1};
+        for (int sq = 0; sq < 64; sq++) {
+            if (pos.piece_on(Square(sq)) != B_KNIGHT) continue;
+            int nx = file_of(Square(sq)), ny = rank_of(Square(sq));
+            // Check if knight is adjacent to king
+            for (int i = 0; i < 8; i++) {
+                int dx = bkx + ((i > 3) + 1) * (((i % 4) > 1) * 2 - 1);
+                int dy = bky + (2 - (i > 3)) * ((i % 2 == 0) * 2 - 1);
+                // Simpler: knight defends sq if king attacks sq and knight attacks sq
+            }
+        }
+        // Simplified for now
+        knightDef = knight_defender_total(pos); // This is for white — TODO fix for black
+    }
+
+    int shelter = shelter_strength(pos) - shelter_storm(pos);
+    int mobDiff = mobility_mg(pos); // TODO: - mobility_mg(colorflip(pos))
+
+    // Safe checks with diminishing returns (min caps)
+    int safeQ = safe_check_total(pos, 3);
+    int safeR = safe_check_total(pos, 2);
+    int safeB = safe_check_total(pos, 1);
+    int safeN = safe_check_total(pos, 0);
+
+    int v = count * weight
+          +  69 * kAttacks
+          + 185 * weak
+          - 100 * (knightDef > 0 ? 1 : 0)
+          + 148 * unsafeCk
+          +  98 * blockers
+          -   4 * flankDef
+          + 3 * flankAtt * flankAtt / 8
+          - 873 * noQueen
+          - 6 * shelter / 8
+          + mobDiff
+          + 37
+          + (int)(772 * std::min(safeQ, 1))    // simplified: cap at 1
+          + (int)(1084 * std::min(safeR, 1))
+          + (int)(645 * std::min(safeB, 1))
+          + (int)(792 * std::min(safeN, 1));
+
+    return v > 100 ? v : 0;
+}
+
+// Mobility area: squares included in mobility calculation
+// Excludes: our king/queen, squares attacked by enemy pawns,
+// our blocked pawns or pawns on ranks 2-3, blockers for our king
+static int mobility_area(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    Piece p = pos.piece_on(sq);
+
+    // Exclude our king and queen
+    if (p == W_KING || p == W_QUEEN) return 0;
+
+    // Exclude squares attacked by enemy pawns
+    if (sx > 0 && sy > 0 && pos.piece_on(make_square(sx - 1, sy - 1)) == B_PAWN) return 0;
+    if (sx < 7 && sy > 0 && pos.piece_on(make_square(sx + 1, sy - 1)) == B_PAWN) return 0;
+
+    // Exclude our blocked pawns or pawns on ranks 2-3
+    if (p == W_PAWN) {
+        int r = rank_of(sq) + 1; // 1-indexed rank
+        if (r < 4) return 0;     // rank 1-3
+        // Blocked: piece directly in front
+        if (sy < 7 && pos.piece_on(make_square(sx, sy + 1)) != NO_PIECE) return 0;
+    }
+
+    // Exclude blockers for our king (pieces pinned to white king)
+    // These are our pieces that are pinned — can't move freely
+    if (p != NO_PIECE && color_of(p) == WHITE) {
+        int dir = pinned_direction(pos, sq);
+        if (dir > 0) return 0; // pinned to our king
+    }
+
+    return 1;
+}
+
+// Mobility: count attacked squares in mobility area for each piece
+// For queen: ignore squares defended by enemy N/B/R
+// For minors: ignore squares occupied by our queen
+static int mobility(const Position& pos, Square square) {
+    if (square == SQ_NONE) return 0;
+    Piece p = pos.piece_on(square);
+    if (p == NO_PIECE || color_of(p) != WHITE) return 0;
+    PieceType pt = type_of(p);
+    if (pt < KNIGHT || pt > QUEEN) return 0;
+
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Square s2 = Square(sq);
+        if (!mobility_area(pos, s2)) continue;
+        Piece target = pos.piece_on(s2);
+
+        if (pt == KNIGHT && knight_attack(pos, s2, square) && target != W_QUEEN) v++;
+        if (pt == BISHOP && bishop_xray_attack(pos, s2, square) && target != W_QUEEN) v++;
+        if (pt == ROOK && rook_xray_attack(pos, s2, square)) v++;
+        if (pt == QUEEN && queen_attack(pos, s2, square)) v++;
+    }
+    return v;
+}
+
+static int mobility_total(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++)
+        v += mobility(pos, Square(sq));
+    return v;
+}
+
+// Supported: count pawns supporting this pawn (diagonally behind)
+static int supported(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_PAWN) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    int v = 0;
+    if (sx > 0 && sy < 7 && pos.piece_on(make_square(sx - 1, sy + 1)) == W_PAWN) v++;
+    if (sx < 7 && sy < 7 && pos.piece_on(make_square(sx + 1, sy + 1)) == W_PAWN) v++;
+    return v;
+}
+
+// Candidate passed: is this pawn passed or a candidate to become passed?
+// Checks: no stoppers, or can lever through, or outnumbers lever pushes
+static int candidate_passed(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_PAWN) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+
+    // Check for own pawn ahead on same file — not passed
+    int ty1 = 8, ty2 = 8; // ty1=enemy pawn same file, ty2=enemy pawn adjacent file
+    for (int y = sy - 1; y >= 0; y--) {
+        if (pos.piece_on(make_square(sx, y)) == W_PAWN) return 0;
+        if (pos.piece_on(make_square(sx, y)) == B_PAWN) ty1 = y;
+        if (sx > 0 && pos.piece_on(make_square(sx - 1, y)) == B_PAWN) ty2 = std::min(ty2, y);
+        if (sx < 7 && pos.piece_on(make_square(sx + 1, y)) == B_PAWN) ty2 = std::min(ty2, y);
+    }
+
+    // (a) no stoppers except some levers
+    if (ty1 == 8 && ty2 >= sy - 1) return 1;
+
+    // Quick reject
+    if (ty2 < sy - 2 || ty1 < sy - 1) return 0;
+
+    // (c) one front stopper which can be levered
+    if (ty2 >= sy && ty1 == sy - 1 && sy < 4) {
+        // Left lever
+        if (sx > 0 && sy < 7 && pos.piece_on(make_square(sx - 1, sy + 1)) == W_PAWN
+            && (sx < 1 || pos.piece_on(make_square(sx - 1, sy)) != B_PAWN)
+            && (sx < 2 || pos.piece_on(make_square(sx - 2, sy - 1)) != B_PAWN)) return 1;
+        // Right lever
+        if (sx < 7 && sy < 7 && pos.piece_on(make_square(sx + 1, sy + 1)) == W_PAWN
+            && (sx > 6 || pos.piece_on(make_square(sx + 1, sy)) != B_PAWN)
+            && (sx > 5 || pos.piece_on(make_square(sx + 2, sy - 1)) != B_PAWN)) return 1;
+    }
+
+    // Blocked by enemy pawn directly ahead
+    if (sy > 0 && pos.piece_on(make_square(sx, sy - 1)) == B_PAWN) return 0;
+
+    // Count levers, lever pushes, phalanx
+    int lever = 0, leverpush = 0, phalanx = 0;
+    if (sx > 0 && sy > 0 && pos.piece_on(make_square(sx - 1, sy - 1)) == B_PAWN) lever++;
+    if (sx < 7 && sy > 0 && pos.piece_on(make_square(sx + 1, sy - 1)) == B_PAWN) lever++;
+    if (sx > 0 && sy > 1 && pos.piece_on(make_square(sx - 1, sy - 2)) == B_PAWN) leverpush++;
+    if (sx < 7 && sy > 1 && pos.piece_on(make_square(sx + 1, sy - 2)) == B_PAWN) leverpush++;
+    if (sx > 0 && pos.piece_on(make_square(sx - 1, sy)) == W_PAWN) phalanx++;
+    if (sx < 7 && pos.piece_on(make_square(sx + 1, sy)) == W_PAWN) phalanx++;
+
+    if (lever - supported(pos, sq) > 1) return 0;
+    if (leverpush - phalanx > 0) return 0;
+    if (lever > 0 && leverpush > 0) return 0;
+
+    return 1;
+}
+
+static int candidate_passed_total(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++)
+        v += candidate_passed(pos, Square(sq));
+    return v;
+}
+
+// Passed leverable: candidate passer that can actually advance
+// If blocked by enemy pawn, needs a feasible lever (adjacent friendly pawn)
+static int passed_leverable(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (!candidate_passed(pos, sq)) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+
+    // Not blocked by enemy pawn — always leverable
+    if (sy == 0 || pos.piece_on(make_square(sx, sy - 1)) != B_PAWN) return 1;
+
+    // Blocked — check for feasible lever
+    for (int dir = -1; dir <= 1; dir += 2) {
+        int lx = sx + dir;
+        if (lx < 0 || lx > 7) continue;
+        // Friendly pawn behind to lever with
+        if (sy < 7 && pos.piece_on(make_square(lx, sy + 1)) != W_PAWN) continue;
+        // Lever square not blocked by enemy piece
+        Piece onLever = pos.piece_on(make_square(lx, sy));
+        if (onLever != NO_PIECE && color_of(onLever) == BLACK) continue;
+        // Either we attack the lever square or enemy doesn't defend it strongly
+        if (attack(pos, make_square(lx, sy)) > 0) return 1;
+        // TODO: check enemy attack count <= 1 (needs colorflip)
+        return 1; // simplified
+    }
+    return 0;
+}
+
+// King proximity: EG bonus based on king distances to passed pawn
+// Bonus for enemy king being far, penalty for our king being far
+static int king_proximity(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (!passed_leverable(pos, sq)) return 0;
+    int r = rank_of(sq);
+    int rr = 7 - r; // rank from white's perspective (rank 8 = 0 internal)
+    // Actually in Stockfish guide, rank(pos, square)-1 where rank=8-y
+    // Our rank_of gives 0=rank1, 7=rank8. For white pawn, relative rank = rank_of
+    // White pawn on rank_of=6 means 7th rank. r = rank_of(sq) for white perspective
+    int relRank = r; // 0=rank1, 7=rank8
+    int w = relRank > 2 ? 5 * relRank - 13 : 0;
+    if (w <= 0) return 0;
+
+    int v = 0;
+    int px = file_of(sq), py = rank_of(sq);
+
+    // Find both kings
+    for (int s = 0; s < 64; s++) {
+        Piece p = pos.piece_on(Square(s));
+        int kx = file_of(Square(s)), ky = rank_of(Square(s));
+
+        if (p == B_KING) {
+            // Enemy king far from block square = bonus
+            int dist = std::min(std::max(std::abs(ky - py + 1), std::abs(kx - px)), 5);
+            v += (dist * 19 / 4) * w;
+        }
+        if (p == W_KING) {
+            // Our king far from block square = penalty
+            int dist = std::min(std::max(std::abs(ky - py + 1), std::abs(kx - px)), 5);
+            v -= dist * 2 * w;
+            // Second push consideration
+            if (py > 1) {
+                int dist2 = std::min(std::max(std::abs(ky - py + 2), std::abs(kx - px)), 5);
+                v -= dist2 * w;
+            }
+        }
+    }
+    return v;
+}
+
+// Passed block: bonus if passed pawn is free to advance
+// Adjusted by attack/defense of block square and path
+static int passed_block(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (!passed_leverable(pos, sq)) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    int relRank = sy; // white pawn rank
+
+    if (relRank < 3) return 0; // rank < 4 (0-indexed: < 3)
+    // Block square must be empty
+    if (sy > 0 && pos.piece_on(make_square(sx, sy - 1)) != NO_PIECE) return 0;
+
+    int r = relRank;
+    int w = r > 2 ? 5 * r - 13 : 0;
+
+    // Count defended/unsafe squares on path to promotion
+    int defended = 0, unsafe = 0, wunsafe = 0;
+    int defended1 = 0, unsafe1 = 0;
+
+    for (int y = sy - 1; y >= 0; y--) {
+        if (attack(pos, make_square(sx, y))) defended++;
+        // TODO: enemy attack (needs colorflip) — approximate with 0
+        if (y == sy - 1) {
+            defended1 = defended;
+            unsafe1 = unsafe;
+        }
+    }
+
+    // Rook/Queen behind pawn boost defense/unsafe
+    for (int y = sy + 1; y < 8; y++) {
+        Piece p = pos.piece_on(make_square(sx, y));
+        if (p == W_ROOK || p == W_QUEEN) defended1 = defended = sy;
+        if (p == B_ROOK || p == B_QUEEN) unsafe1 = unsafe = sy;
+    }
+
+    int k = (unsafe == 0 && wunsafe == 0 ? 35
+           : unsafe == 0 ? 20
+           : unsafe1 == 0 ? 9 : 0)
+          + (defended1 != 0 ? 5 : 0);
+
+    return k * w;
+}
+
+// Passed file: bonus based on file of passed pawn (center files = higher)
+// Returns min(file-1, 8-file) = 0 for a/h, 1 for b/g, 2 for c/f, 3 for d/e
+static int passed_file(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (!passed_leverable(pos, sq)) return 0;
+    int f = file_of(sq) + 1; // 1-indexed file
+    return std::min(f - 1, 8 - f);
+}
+
+// Passed rank: rank of passed pawn (0-6, higher = closer to promotion)
+// 73 ELO worth — one of the most important terms!
+static int passed_rank(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (!passed_leverable(pos, sq)) return 0;
+    return rank_of(sq); // 0=rank1, 6=rank7 for white pawn
+}
+
 // === Sub-components (TODO: implement each) ===
 
-static int piece_value_mg(const Position& pos) { return 0; } // TODO
-static int psqt_mg(const Position& pos) { return 0; }        // TODO
+// Piece value bonus: material values (Stockfish classical)
+// MG: P=124, N=781, B=825, R=1276, Q=2538
+// EG: P=206, N=854, B=915, R=1380, Q=2682
+static const int PieceValueMG[] = {0, 124, 781, 825, 1276, 2538, 0}; // NO_PT, P, N, B, R, Q, K
+static const int PieceValueEG[] = {0, 206, 854, 915, 1380, 2682, 0};
+
+// Piece value MG: sum of white material - black material (MG values)
+static int piece_value_mg(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Piece p = pos.piece_on(Square(sq));
+        if (p == NO_PIECE) continue;
+        PieceType pt = type_of(p);
+        if (pt < PAWN || pt > QUEEN) continue;
+        if (color_of(p) == WHITE) v += PieceValueMG[pt];
+        else                      v -= PieceValueMG[pt];
+    }
+    return v;
+}
+// PSQT bonus tables (Stockfish classical)
+// Pieces indexed: [rank from white 8th][min(file, 7-file)] — horizontally mirrored
+// Pawns indexed: [rank from white 8th][file]
+
+static const int PieceBonusMG[5][8][4] = {
+    // Knight
+    {{-175,-92,-74,-73},{-77,-41,-27,-15},{-61,-17,6,12},{-35,8,40,49},{-34,13,44,51},{-9,22,58,53},{-67,-27,4,37},{-201,-83,-56,-26}},
+    // Bishop
+    {{-53,-5,-8,-23},{-15,8,19,4},{-7,21,-5,17},{-5,11,25,39},{-12,29,22,31},{-16,6,1,11},{-17,-14,5,0},{-48,1,-14,-23}},
+    // Rook
+    {{-31,-20,-14,-5},{-21,-13,-8,6},{-25,-11,-1,3},{-13,-5,-4,-6},{-27,-15,-4,3},{-22,-2,6,12},{-2,12,16,18},{-17,-19,-1,9}},
+    // Queen
+    {{3,-5,-5,4},{-3,5,8,12},{-3,6,13,7},{4,5,9,8},{0,14,12,5},{-4,10,6,8},{-5,6,10,8},{-2,-2,1,-2}},
+    // King
+    {{271,327,271,198},{278,303,234,179},{195,258,169,120},{164,190,138,98},{154,179,105,70},{123,145,81,31},{88,120,65,33},{59,89,45,-1}}
+};
+
+static const int PieceBonusEG[5][8][4] = {
+    // Knight
+    {{-96,-65,-49,-21},{-67,-54,-18,8},{-40,-27,-8,29},{-35,-2,13,28},{-45,-16,9,39},{-51,-44,-16,17},{-69,-50,-51,12},{-100,-88,-56,-17}},
+    // Bishop
+    {{-57,-30,-37,-12},{-37,-13,-17,1},{-16,-1,-2,10},{-20,-6,0,17},{-17,-1,-14,15},{-30,6,4,6},{-31,-20,-1,1},{-46,-42,-37,-24}},
+    // Rook
+    {{-9,-13,-10,-9},{-12,-9,-1,-2},{6,-8,-2,-6},{-6,1,-9,7},{-5,8,7,-6},{6,1,-7,10},{4,5,20,-5},{18,0,19,13}},
+    // Queen
+    {{-69,-57,-47,-26},{-55,-31,-22,-4},{-39,-18,-9,3},{-23,-3,13,24},{-29,-6,9,21},{-38,-18,-12,1},{-50,-27,-24,-8},{-75,-52,-43,-36}},
+    // King
+    {{1,45,85,76},{53,100,133,135},{88,130,169,175},{103,156,172,172},{96,166,199,199},{92,172,184,191},{47,121,116,131},{11,59,73,78}}
+};
+
+static const int PawnBonusMG[8][8] = {
+    {0,0,0,0,0,0,0,0},
+    {3,3,10,19,16,19,7,-5},
+    {-9,-15,11,15,32,22,5,-22},
+    {-4,-23,6,20,40,17,4,-8},
+    {13,0,-13,1,11,-2,-13,5},
+    {5,-12,-7,22,-8,-5,-15,-8},
+    {-7,7,-3,-13,5,-16,10,-8},
+    {0,0,0,0,0,0,0,0}
+};
+
+static const int PawnBonusEG[8][8] = {
+    {0,0,0,0,0,0,0,0},
+    {-10,-6,10,0,14,7,-5,-19},
+    {-10,-10,-10,4,4,3,-6,-4},
+    {6,-2,-8,-4,-13,-12,-10,-9},
+    {10,5,4,-5,-5,-5,14,9},
+    {28,20,21,28,30,7,6,13},
+    {0,-11,12,21,25,19,4,7},
+    {0,0,0,0,0,0,0,0}
+};
+
+// PSQT MG: sum of PST bonuses for white - black
+static int psqt_mg(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Piece p = pos.piece_on(Square(sq));
+        if (p == NO_PIECE) continue;
+        PieceType pt = type_of(p);
+        if (pt < PAWN || pt > KING) continue;
+        int x = file_of(Square(sq));
+        int y = rank_of(Square(sq));
+        // From white's perspective: rank index = 7-y for white, y for black
+        int ry = (color_of(p) == WHITE) ? 7 - y : y;
+        int bonus;
+        if (pt == PAWN) {
+            int fx = (color_of(p) == WHITE) ? x : 7 - x;
+            bonus = PawnBonusMG[ry][fx];
+        } else {
+            int fx = std::min(x, 7 - x);
+            bonus = PieceBonusMG[pt - KNIGHT][ry][fx]; // KNIGHT=2 -> index 0
+        }
+        if (color_of(p) == WHITE) v += bonus;
+        else                      v -= bonus;
+    }
+    return v;
+}
 // imbalance_total — defined above
 static int pawns_mg(const Position& pos) { return 0; }       // TODO
 static int pieces_mg(const Position& pos) { return 0; }      // TODO
-static int mobility_mg(const Position& pos) { return 0; }    // TODO
+// Mobility bonus tables indexed by [piece_type][mobility_count]
+static const int MobilityBonusMG[4][28] = {
+    // Knight (0-8)
+    {-62,-53,-12,-4,3,13,22,28,33},
+    // Bishop (0-13)
+    {-48,-20,16,26,38,51,55,63,63,68,81,81,91,98},
+    // Rook (0-14)
+    {-60,-20,2,3,3,11,22,31,40,40,41,48,57,57,62},
+    // Queen (0-27)
+    {-30,-12,-8,-9,20,23,23,35,38,53,64,65,65,66,67,67,72,72,77,79,93,108,108,108,110,114,114,116}
+};
+static const int MobilityBonusEG[4][28] = {
+    {-81,-56,-31,-16,5,11,17,20,25},
+    {-59,-23,-3,13,24,42,54,57,65,73,78,86,88,97},
+    {-78,-17,23,39,70,99,103,121,134,139,158,164,168,169,172},
+    {-48,-30,-7,19,40,55,59,75,78,96,96,100,121,127,131,133,136,141,147,150,151,168,168,171,182,182,192,219}
+};
+static const int MobilityMaxCount[] = {8, 13, 14, 27}; // max index per piece type
+
+// Mobility bonus for a single piece
+static int mobility_bonus(const Position& pos, Square sq, bool mg) {
+    Piece p = pos.piece_on(sq);
+    if (p == NO_PIECE || color_of(p) != WHITE) return 0;
+    PieceType pt = type_of(p);
+    int idx = pt - KNIGHT; // N=0, B=1, R=2, Q=3
+    if (idx < 0 || idx > 3) return 0;
+    int mob = std::min(mobility(pos, sq), MobilityMaxCount[idx]);
+    return mg ? MobilityBonusMG[idx][mob] : MobilityBonusEG[idx][mob];
+}
+
+// Mobility MG: sum of mobility bonuses for all white pieces - black
+static int mobility_mg(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Piece p = pos.piece_on(Square(sq));
+        if (p == NO_PIECE) continue;
+        PieceType pt = type_of(p);
+        if (pt < KNIGHT || pt > QUEEN) continue;
+        // For black pieces, we'd need colorflip — simplified:
+        // compute white mobility only, black handled by caller (white - colorflip)
+        if (color_of(p) == WHITE)
+            v += mobility_bonus(pos, Square(sq), true);
+    }
+    return v;
+}
 static int threats_mg(const Position& pos) { return 0; }     // TODO
-static int passed_mg(const Position& pos) { return 0; }      // TODO
+// Passed MG: rank bonus + block bonus - file penalty
+static int passed_mg(const Position& pos) {
+    static const int RankBonus[] = {0, 10, 17, 15, 62, 168, 276};
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Square s = Square(sq);
+        if (!passed_leverable(pos, s)) continue;
+        int r = passed_rank(pos, s);
+        if (r >= 0 && r < 7) v += RankBonus[r];
+        v += passed_block(pos, s);
+        v -= 11 * passed_file(pos, s);
+    }
+    return v;
+}
 static int space(const Position& pos) { return 0; }          // TODO
-static int king_mg(const Position& pos) { return 0; }        // TODO
+// King MG: shelter, storm, danger², flank attack, pawnless flank
+static int king_mg(const Position& pos) {
+    int v = 0;
+    int kd = king_danger(pos);
+    v -= shelter_strength(pos);
+    v += shelter_storm(pos);
+    v += kd * kd / 4096;    // quadratic danger — big penalty when danger is high
+    v += 8 * flank_attack_total(pos);
+    v += 17 * pawnless_flank(pos);
+    return v;
+}
 static int winnable_total_mg(const Position& pos, int v) { return 0; } // TODO
 
 // Middle game evaluation — all MG terms combined
@@ -1203,14 +1698,82 @@ static int middle_game_evaluation(const Position& pos, bool nowinnable = false) 
 
 // === EG Sub-components (TODO: implement each) ===
 
-static int piece_value_eg(const Position& pos) { return 0; } // TODO
-static int psqt_eg(const Position& pos) { return 0; }        // TODO
+// Piece value EG
+static int piece_value_eg(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Piece p = pos.piece_on(Square(sq));
+        if (p == NO_PIECE) continue;
+        PieceType pt = type_of(p);
+        if (pt < PAWN || pt > QUEEN) continue;
+        if (color_of(p) == WHITE) v += PieceValueEG[pt];
+        else                      v -= PieceValueEG[pt];
+    }
+    return v;
+}
+// PSQT EG
+static int psqt_eg(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Piece p = pos.piece_on(Square(sq));
+        if (p == NO_PIECE) continue;
+        PieceType pt = type_of(p);
+        if (pt < PAWN || pt > KING) continue;
+        int x = file_of(Square(sq));
+        int y = rank_of(Square(sq));
+        int ry = (color_of(p) == WHITE) ? 7 - y : y;
+        int bonus;
+        if (pt == PAWN) {
+            int fx = (color_of(p) == WHITE) ? x : 7 - x;
+            bonus = PawnBonusEG[ry][fx];
+        } else {
+            int fx = std::min(x, 7 - x);
+            bonus = PieceBonusEG[pt - KNIGHT][ry][fx];
+        }
+        if (color_of(p) == WHITE) v += bonus;
+        else                      v -= bonus;
+    }
+    return v;
+}
 static int pawns_eg(const Position& pos) { return 0; }       // TODO
 static int pieces_eg(const Position& pos) { return 0; }      // TODO
-static int mobility_eg(const Position& pos) { return 0; }    // TODO
+// Mobility EG
+static int mobility_eg(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Piece p = pos.piece_on(Square(sq));
+        if (p == NO_PIECE || color_of(p) != WHITE) continue;
+        PieceType pt = type_of(p);
+        if (pt < KNIGHT || pt > QUEEN) continue;
+        v += mobility_bonus(pos, Square(sq), false);
+    }
+    return v;
+}
 static int threats_eg(const Position& pos) { return 0; }     // TODO
-static int passed_eg(const Position& pos) { return 0; }      // TODO
-static int king_eg(const Position& pos) { return 0; }        // TODO
+// Passed EG: king proximity + rank bonus + block bonus - file penalty
+static int passed_eg(const Position& pos) {
+    static const int RankBonus[] = {0, 28, 33, 41, 72, 177, 260};
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Square s = Square(sq);
+        if (!passed_leverable(pos, s)) continue;
+        v += king_proximity(pos, s);
+        int r = passed_rank(pos, s);
+        if (r >= 0 && r < 7) v += RankBonus[r];
+        v += passed_block(pos, s);
+        v -= 8 * passed_file(pos, s);
+    }
+    return v;
+}
+// King EG: king-pawn distance, endgame shelter, pawnless flank, danger/16
+static int king_eg(const Position& pos) {
+    int v = 0;
+    v -= 16 * king_pawn_distance(pos);  // king must be near pawns in EG
+    v += endgame_shelter(pos);            // blocked storm EG component
+    v += 95 * pawnless_flank(pos);        // bigger penalty in EG
+    v += king_danger(pos) / 16;           // linear (not quadratic) in EG
+    return v;
+}
 static int winnable_total_eg(const Position& pos, int v) { return 0; } // TODO
 
 // End game evaluation — all EG terms combined
@@ -1274,7 +1837,18 @@ static int queen_count(const Position& pos, Color c) { return 0; }      // TODO
 static int bishop_count(const Position& pos, Color c) { return 0; }     // TODO
 static int knight_count(const Position& pos, Color c) { return 0; }     // TODO
 static int piece_count(const Position& pos, Color c) { return 0; }      // TODO: all pieces
-static int non_pawn_material(const Position& pos, Color c) { return 0; }// TODO
+// Non pawn material: sum of MG values of N+B+R+Q for given color
+static int non_pawn_material(const Position& pos, Color c) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Piece p = pos.piece_on(Square(sq));
+        if (p == NO_PIECE || color_of(p) != c) continue;
+        PieceType pt = type_of(p);
+        if (pt >= KNIGHT && pt <= QUEEN)
+            v += PieceValueMG[pt];
+    }
+    return v;
+}
 static bool opposite_bishops(const Position& pos) { return false; }     // TODO
 static int candidate_passed(const Position& pos, Color c) { return 0; } // TODO
 
