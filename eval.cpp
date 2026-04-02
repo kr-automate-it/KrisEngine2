@@ -2217,91 +2217,199 @@ static int hanging_threat(const Position& pos) {
     return v;
 }
 
-// King threat: any enemy piece attacked near their king
+// King threat: weak enemy pieces attacked by our king (4.69 ELO)
 static int king_threat(const Position& pos) {
     int v = 0;
     for (int sq = 0; sq < 64; sq++) {
-        if (!weak_enemies(pos, Square(sq))) continue;
-        if (king_ring(pos, Square(sq))) v++;
+        Square s = Square(sq);
+        Piece p = pos.piece_on(s);
+        if (p == NO_PIECE || color_of(p) != BLACK) continue;
+        if (type_of(p) < PAWN || type_of(p) > QUEEN) continue;
+        if (!weak_enemies(pos, s)) continue;
+        if (!king_attack(pos, s)) continue;
+        v++;
     }
     return v;
 }
 
-// Pawn push threat: pawn can push and attack enemy piece
+// Pawn push threat: enemy piece that can be attacked by a pawn push (7.89 ELO)
+// Checks single push and double push from rank 2
 static int pawn_push_threat(const Position& pos) {
     int v = 0;
     for (int sq = 0; sq < 64; sq++) {
-        if (pos.piece_on(Square(sq)) != W_PAWN) continue;
+        Piece p = pos.piece_on(Square(sq));
+        if (p == NO_PIECE || color_of(p) != BLACK) continue;
+        if (type_of(p) < PAWN) continue;
         int sx = file_of(Square(sq)), sy = rank_of(Square(sq));
-        if (sy <= 0) continue;
-        // Can push? (square ahead empty)
-        if (pos.piece_on(make_square(sx, sy - 1)) != NO_PIECE) continue;
-        // After push, would attack enemy piece?
-        Square pushed = make_square(sx, sy - 1);
-        int px = file_of(pushed), py = rank_of(pushed);
-        if (px > 0 && py > 0) {
-            Piece t = pos.piece_on(make_square(px - 1, py - 1));
-            if (t != NO_PIECE && color_of(t) == BLACK && type_of(t) >= KNIGHT) v++;
-        }
-        if (px < 7 && py > 0) {
-            Piece t = pos.piece_on(make_square(px + 1, py - 1));
-            if (t != NO_PIECE && color_of(t) == BLACK && type_of(t) >= KNIGHT) v++;
-        }
-    }
-    return v;
-}
 
-// Slider on queen: our bishop/rook xraying enemy queen
-static int slider_on_queen(const Position& pos) {
-    int v = 0;
-    for (int sq = 0; sq < 64; sq++) {
-        if (pos.piece_on(Square(sq)) != B_QUEEN) continue;
-        // Check if our sliders xray this queen through mobility area
-        if (bishop_xray_attack(pos, Square(sq)) && mobility_area(pos, Square(sq))) v++;
-        if (rook_xray_attack(pos, Square(sq)) && mobility_area(pos, Square(sq))) v++;
-    }
-    return v;
-}
+        for (int ix = -1; ix <= 1; ix += 2) {
+            int px = sx + ix;
+            if (px < 0 || px > 7) continue;
 
-// Knight on queen: our knight attacking squares near enemy queen
-static int knight_on_queen(const Position& pos) {
-    int v = 0;
-    for (int sq = 0; sq < 64; sq++) {
-        if (pos.piece_on(Square(sq)) != B_QUEEN) continue;
-        // Check adjacent squares for our knight attacks
-        int qx = file_of(Square(sq)), qy = rank_of(Square(sq));
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
-                int nx = qx + dx, ny = qy + dy;
-                if (nx < 0 || nx > 7 || ny < 0 || ny > 7) continue;
-                if (knight_attack(pos, make_square(nx, ny)) && mobility_area(pos, make_square(nx, ny)))
-                    v++;
+            // Single push: pawn 2 ranks behind, 1 rank behind empty, not attacked by enemy pawns
+            if (sy + 2 < 8 && pos.piece_on(make_square(px, sy + 2)) == W_PAWN
+                && pos.piece_on(make_square(px, sy + 1)) == NO_PIECE
+                && (px == 0 || pos.piece_on(make_square(px - 1, sy)) != B_PAWN)
+                && (px == 7 || pos.piece_on(make_square(px + 1, sy)) != B_PAWN)
+                && (attack(pos, make_square(px, sy + 1)) > 0 /* || !enemy attack */)) {
+                v++;
+                continue;
+            }
+
+            // Double push: pawn 3 ranks behind (on rank 2), path clear
+            if (sy == 3 && sy + 3 < 8
+                && pos.piece_on(make_square(px, sy + 3)) == W_PAWN
+                && pos.piece_on(make_square(px, sy + 2)) == NO_PIECE
+                && pos.piece_on(make_square(px, sy + 1)) == NO_PIECE
+                && (px == 0 || pos.piece_on(make_square(px - 1, sy)) != B_PAWN)
+                && (px == 7 || pos.piece_on(make_square(px + 1, sy)) != B_PAWN)
+                && (attack(pos, make_square(px, sy + 1)) > 0)) {
+                v++;
             }
         }
     }
     return v;
 }
 
-// Restricted: our pieces attacked by enemy piece of lesser value
+// Slider on queen: safe slider threats on enemy queen
+// Only when enemy has exactly 1 queen. Bonus x2 if we have no queen.
+static int slider_on_queen(const Position& pos) {
+    // Count enemy queens
+    int enemyQueens = 0;
+    for (int s = 0; s < 64; s++)
+        if (pos.piece_on(Square(s)) == B_QUEEN) enemyQueens++;
+    if (enemyQueens != 1) return 0;
+
+    int ourQueens = 0;
+    for (int s = 0; s < 64; s++)
+        if (pos.piece_on(Square(s)) == W_QUEEN) ourQueens++;
+
+    int bonus = (ourQueens == 0) ? 2 : 1;
+    int v = 0;
+
+    for (int sq = 0; sq < 64; sq++) {
+        Square s = Square(sq);
+        // Must be empty, not attacked by enemy pawn, attacked by us >1, in mobility area
+        if (pos.piece_on(s) == W_PAWN) continue;
+        int sx = file_of(s), sy = rank_of(s);
+        if (sx > 0 && sy > 0 && pos.piece_on(make_square(sx - 1, sy - 1)) == B_PAWN) continue;
+        if (sx < 7 && sy > 0 && pos.piece_on(make_square(sx + 1, sy - 1)) == B_PAWN) continue;
+        if (attack(pos, s) <= 1) continue;
+        if (!mobility_area(pos, s)) continue;
+
+        // Check if our bishop xrays queen diagonally, or rook xrays queen on straight
+        // TODO: full queen_attack_diagonal from black perspective
+        if (bishop_xray_attack(pos, s)) { v += bonus; continue; }
+        if (rook_xray_attack(pos, s)) { v += bonus; continue; }
+    }
+    return v;
+}
+
+// Knight on queen: safe knight attack on squares that are knight-move from enemy queen
+// Only when enemy has exactly 1 queen
+static int knight_on_queen(const Position& pos) {
+    // Find single enemy queen
+    int qx = -1, qy = -1, qcount = 0;
+    for (int s = 0; s < 64; s++) {
+        if (pos.piece_on(Square(s)) == B_QUEEN) {
+            qx = file_of(Square(s)); qy = rank_of(Square(s)); qcount++;
+        }
+    }
+    if (qcount != 1) return 0;
+
+    int ourQueens = 0;
+    for (int s = 0; s < 64; s++)
+        if (pos.piece_on(Square(s)) == W_QUEEN) ourQueens++;
+    int bonus = (ourQueens == 0) ? 2 : 1;
+
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Square s = Square(sq);
+        int sx = file_of(s), sy = rank_of(s);
+        if (pos.piece_on(s) == W_PAWN) continue;
+        if (sx > 0 && sy > 0 && pos.piece_on(make_square(sx - 1, sy - 1)) == B_PAWN) continue;
+        if (sx < 7 && sy > 0 && pos.piece_on(make_square(sx + 1, sy - 1)) == B_PAWN) continue;
+        if (!mobility_area(pos, s)) continue;
+        if (!knight_attack(pos, s)) continue;
+        // Square must be knight-move from queen
+        if ((std::abs(qx - sx) == 2 && std::abs(qy - sy) == 1)
+         || (std::abs(qx - sx) == 1 && std::abs(qy - sy) == 2))
+            v += bonus;
+    }
+    return v;
+}
+
+// Restricted: squares we attack AND enemy attacks, but enemy can't use pawn defense
+// and we don't only have 1 attacker vs 2+ enemy defenders
 static int restricted(const Position& pos) {
     int v = 0;
     for (int sq = 0; sq < 64; sq++) {
-        Piece p = pos.piece_on(Square(sq));
-        if (p == NO_PIECE || color_of(p) != BLACK) continue;
-        // Does this black piece attack any white piece and is it protected?
-        // Simplified: count squares attacked by enemy but also by us
-        if (attack(pos, Square(sq)) && pawn_attack(pos, Square(sq)) == 0) v++;
+        Square s = Square(sq);
+        int ourAtt = attack(pos, s);
+        if (ourAtt == 0) continue;
+
+        // Count enemy attacks/pawn attacks on this square (simplified)
+        int sx = file_of(s), sy = rank_of(s);
+        int enemyAtt = 0, enemyPawnAtt = 0;
+        // Black pawn attacks
+        if (sx > 0 && sy < 7 && pos.piece_on(make_square(sx - 1, sy + 1)) == B_PAWN) { enemyAtt++; enemyPawnAtt++; }
+        if (sx < 7 && sy < 7 && pos.piece_on(make_square(sx + 1, sy + 1)) == B_PAWN) { enemyAtt++; enemyPawnAtt++; }
+        // Black pieces (simplified count)
+        static const int dx8[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+        static const int dy8[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+        for (int i = 0; i < 8; i++) {
+            int nx = sx + dx8[i], ny = sy + dy8[i];
+            if (nx >= 0 && nx <= 7 && ny >= 0 && ny <= 7)
+                if (pos.piece_on(make_square(nx, ny)) == B_KING) enemyAtt++;
+        }
+        static const int kdx[] = {-2, -1, 1, 2, 2, 1, -1, -2};
+        static const int kdy[] = {-1, -2, -2, -1, 1, 2, 2, 1};
+        for (int i = 0; i < 8; i++) {
+            int nx = sx + kdx[i], ny = sy + kdy[i];
+            if (nx >= 0 && nx <= 7 && ny >= 0 && ny <= 7)
+                if (pos.piece_on(make_square(nx, ny)) == B_KNIGHT) enemyAtt++;
+        }
+        for (int i = 0; i < 8; i++) {
+            for (int d = 1; d < 8; d++) {
+                int nx = sx + d * dx8[i], ny = sy + d * dy8[i];
+                if (nx < 0 || nx > 7 || ny < 0 || ny > 7) break;
+                Piece p = pos.piece_on(make_square(nx, ny));
+                if (p == NO_PIECE) continue;
+                bool isDiag = (dx8[i] != 0 && dy8[i] != 0);
+                if ((p == B_QUEEN) || (p == B_BISHOP && isDiag) || (p == B_ROOK && !isDiag))
+                    enemyAtt++;
+                break;
+            }
+        }
+
+        if (enemyAtt == 0) continue;           // enemy doesn't attack — not restricted
+        if (enemyPawnAtt > 0) continue;         // enemy pawn defends — not restricted
+        if (enemyAtt > 1 && ourAtt == 1) continue; // we're outnumbered
+        v++;
     }
-    return std::max(0, v - 4); // approximate
+    return v;
 }
 
-// Weak queen protection: enemy pieces defended only by their queen
+// Weak queen protection: weak enemy piece defended by their queen
 static int weak_queen_protection(const Position& pos) {
     int v = 0;
     for (int sq = 0; sq < 64; sq++) {
-        if (!weak_enemies(pos, Square(sq))) continue;
-        // Defended by queen only?
-        if (queen_attack(pos, Square(sq))) v++; // simplified
+        Square s = Square(sq);
+        if (!weak_enemies(pos, s)) continue;
+        // Check if black queen defends this square
+        int sx = file_of(s), sy = rank_of(s);
+        static const int dx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+        static const int dy[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+        for (int i = 0; i < 8; i++) {
+            for (int d = 1; d < 8; d++) {
+                int nx = sx + d * dx[i], ny = sy + d * dy[i];
+                if (nx < 0 || nx > 7 || ny < 0 || ny > 7) break;
+                Piece p = pos.piece_on(make_square(nx, ny));
+                if (p == B_QUEEN) { v++; goto next_sq; }
+                if (p != NO_PIECE) break;
+            }
+        }
+        next_sq:;
     }
     return v;
 }
