@@ -315,20 +315,18 @@ bool Position::is_legal(Move m) const {
 // === Draw detection ===
 
 bool Position::is_draw() const {
-    // 50-move rule
     if (st_->halfmoveClock >= 100) return true;
 
-    // Repetition
+    // Simple repetition: check if current key appeared before
+    // Only look back halfmoveClock plies (max 100)
+    int limit = std::min((int)st_->halfmoveClock, 50);
     StateInfo* prev = st_->previous;
-    int count = 0;
-    while (prev) {
-        if (prev->previous) prev = prev->previous; else break;
-        if (prev->key == st_->key) {
-            count++;
-            if (count >= 2) return true;
-        }
-        if (prev->halfmoveClock == 0) break; // irreversible move
+    for (int i = 0; i < limit && prev; i++) {
         prev = prev->previous;
+        if (!prev) break;
+        if (prev->key == st_->key) return true;
+        prev = prev->previous; // skip opponent's move
+        if (!prev) break;
     }
     return false;
 }

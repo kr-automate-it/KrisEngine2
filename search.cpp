@@ -46,8 +46,11 @@ static Move countermoves[PIECE_NB][SQUARE_NB];
 
 // === Time management ===
 static bool time_up(SearchInfo& info) {
+    // Timer thread sets info.stopped — check it frequently
+    if (info.stopped.load(std::memory_order_relaxed)) return true;
+
     static thread_local int checkCounter = 0;
-    if (++checkCounter < 4096) return false;
+    if (++checkCounter < 2048) return false;
     checkCounter = 0;
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -96,7 +99,7 @@ static int quiescence(Position& pos, int alpha, int beta, SearchInfo& info, int 
     info.nodes.fetch_add(1, std::memory_order_relaxed);
 
     bool inCheck = pos.in_check();
-    if (ply > 64 && !inCheck) return Eval::evaluate(pos);
+    if (ply > 64) return Eval::evaluate(pos);
 
     // TT probe
     Move ttMove = MOVE_NONE;
@@ -154,6 +157,7 @@ static int quiescence(Position& pos, int alpha, int beta, SearchInfo& info, int 
         pos.do_move(m, newSt);
         int score = -quiescence(pos, -beta, -alpha, info, ply + 1);
         pos.undo_move(m);
+        if (info.stopped.load(std::memory_order_relaxed)) return bestScore;
 
         if (score > bestScore) {
             bestScore = score;
@@ -173,8 +177,22 @@ static int quiescence(Position& pos, int alpha, int beta, SearchInfo& info, int 
 
 static int alpha_beta(Position& pos, int depth, int alpha, int beta,
                        SearchInfo& info, int ply, bool doNull = true, Move prevMove = MOVE_NONE) {
+    // Check stopped FIRST (set by timer or UCI stop command)
     if (info.stopped.load(std::memory_order_relaxed)) return 0;
-    if (time_up(info)) { info.stopped.store(true); return 0; }
+    // Periodic time check
+    {
+        static thread_local int tc = 0;
+        if (++tc >= 2048) {
+            tc = 0;
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - info.startTime).count();
+            if ((info.timeLimit > 0 && elapsed >= info.timeLimit)
+                || (info.timeLimit <= 0 && elapsed > 30000)) {
+                info.stopped.store(true);
+                return 0;
+            }
+        }
+    }
 
     bool pvNode = (beta - alpha > 1);
     bool inCheck = pos.in_check();
@@ -365,6 +383,16 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta,
         pos.undo_move(m);
 
         if (info.stopped.load(std::memory_order_relaxed)) return 0;
+        // Inline time check in move loop
+        if (info.timeLimit > 0) {
+            static thread_local int mtc = 0;
+            if (++mtc >= 512) {
+                mtc = 0;
+                auto el = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - info.startTime).count();
+                if (el >= info.timeLimit) { info.stopped.store(true); return 0; }
+            }
+        }
 
         if (score > bestScore) {
             bestScore = score;
@@ -439,15 +467,17 @@ SearchResult search(Position& pos, SearchInfo& info) {
     for (int depth = 1; depth <= info.maxDepth; depth++) {
         info.depth = depth;
 
-        // Time guard: estimate if next depth will fit in remaining time
-        // Next depth takes ~4x current. Don't start if 4*elapsed > timeLimit.
+        // Time guard: don't start new depth unless safe
         {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - info.startTime).count();
-            // Pessimistic: don't start depth if we've already used >5% of time
-            // This ensures bestmove is always returned
-            if (info.timeLimit > 0 && depth > 4 && elapsed > info.timeLimit / 20) break;
-            if (info.timeLimit <= 0 && elapsed > 5000 && depth > 6) break;
+
+            // Hard rule: if we've used ANY measurable time and remaining < 10x elapsed, stop
+            if (info.timeLimit > 0 && elapsed > 0 && depth > 6) {
+                if (elapsed * 100 > info.timeLimit) break;
+            }
+            // No time limit: max 5 seconds total
+            if (info.timeLimit <= 0 && elapsed > 5000) break;
         }
 
         // Aspiration windows
