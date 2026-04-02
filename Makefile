@@ -1,5 +1,5 @@
 CXX = /c/msys64/ucrt64/bin/g++
-CXXFLAGS = -std=c++20 -O3 -march=native -flto -DNDEBUG
+CXXFLAGS = -std=c++20 -O3 -march=native -flto -DNDEBUG -fpermissive
 LDFLAGS = -lpthread -static
 
 SRC = main.cpp bitboard.cpp position.cpp movegen.cpp eval.cpp search.cpp uci.cpp tt.cpp zobrist.cpp

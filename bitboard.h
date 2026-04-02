@@ -5,7 +5,7 @@
 #include <intrin.h>
 #endif
 
-// === Bit operations ===
+// === Operacje bitowe ===
 
 inline int popcount(U64 b) {
 #if defined(__GNUC__)
@@ -13,7 +13,10 @@ inline int popcount(U64 b) {
 #elif defined(_MSC_VER)
     return (int)__popcnt64(b);
 #else
-    int c = 0; while (b) { c++; b &= b - 1; } return c;
+    // Fallback
+    int count = 0;
+    while (b) { count++; b &= b - 1; }
+    return count;
 #endif
 }
 
@@ -21,15 +24,18 @@ inline Square lsb(U64 b) {
 #if defined(__GNUC__)
     return Square(__builtin_ctzll(b));
 #elif defined(_MSC_VER)
-    unsigned long idx; _BitScanForward64(&idx, b); return Square(idx);
+    unsigned long idx;
+    _BitScanForward64(&idx, b);
+    return Square(idx);
 #else
-    static const int idx64[64] = {
+    // De Bruijn
+    static const int index64[64] = {
         0,1,48,2,57,49,28,3,61,58,50,42,38,29,17,4,
         62,55,59,36,53,51,43,22,45,39,33,30,24,18,12,5,
         63,47,56,27,60,41,37,16,54,35,52,21,44,32,23,11,
         46,26,40,15,34,20,31,10,25,14,19,9,13,8,7,6
     };
-    return Square(idx64[((b & -b) * 0x03f79d71b4cb0a89ULL) >> 58]);
+    return Square(index64[((b & -b) * 0x03f79d71b4cb0a89ULL) >> 58]);
 #endif
 }
 
@@ -39,7 +45,7 @@ inline Square pop_lsb(U64& b) {
     return s;
 }
 
-// === File and rank bitboards ===
+// === Stale bitboardowe ===
 
 constexpr U64 FileA_BB = 0x0101010101010101ULL;
 constexpr U64 FileB_BB = FileA_BB << 1;
@@ -61,14 +67,13 @@ constexpr U64 Rank8_BB = Rank1_BB << 56;
 
 constexpr U64 square_bb(Square s) { return 1ULL << s; }
 
-// === Attack tables ===
+// === Tablice atakow (inicjalizowane w bitboard.cpp) ===
 
 extern U64 PawnAttacks[COLOR_NB][SQUARE_NB];
 extern U64 KnightAttacks[SQUARE_NB];
 extern U64 KingAttacks[SQUARE_NB];
 
-// === Magic bitboards ===
-
+// Magic bitboards dla goncow i wiez
 struct Magic {
     U64* attacks;
     U64  mask;
@@ -95,4 +100,4 @@ inline U64 queen_attacks(Square s, U64 occupied) {
     return bishop_attacks(s, occupied) | rook_attacks(s, occupied);
 }
 
-void bitboard_init();
+void init_bitboards();

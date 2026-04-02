@@ -3,7 +3,7 @@
 #include "uci.h"
 
 int main() {
-    bitboard_init();
+    init_bitboards();
     Zobrist::init();
     uci_loop();
     return 0;

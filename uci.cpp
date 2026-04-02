@@ -33,7 +33,7 @@ static void parse_go(std::istringstream& is) {
         else if (token == "infinite")  infinite = true;
     }
 
-    searchInfo.maxDepth = std::min(depth, 12); // cap until do_move/is_legal bugs fixed
+    searchInfo.maxDepth = depth; // no cap needed — bitboard bug fixed
 
     // Debug: log go parameters
     std::cerr << "go: wtime=" << wtime << " btime=" << btime
