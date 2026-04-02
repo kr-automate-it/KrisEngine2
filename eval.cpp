@@ -1156,9 +1156,7 @@ static int king_danger(const Position& pos) {
     int flankDef = flank_defense_total(pos);
 
     // No queen penalty
-    int noQueen = 1; // TODO: queen_count(pos, WHITE) > 0 ? 0 : 1
-    for (int sq = 0; sq < 64; sq++)
-        if (pos.piece_on(Square(sq)) == W_QUEEN) { noQueen = 0; break; }
+    int noQueen = (queen_count(pos, WHITE) > 0) ? 0 : 1;
 
     // Knight defender for enemy (black has knight defending king)
     int knightDef = 0;  // TODO: knight_defender from black perspective
@@ -2834,11 +2832,38 @@ static int phase(const Position& pos) {
 
 // === Helpers for scale factor (TODO: implement with real Position methods) ===
 
-static int pawn_count(const Position& pos, Color c) { return 0; }       // TODO
-static int queen_count(const Position& pos, Color c) { return 0; }      // TODO
-static int bishop_count(const Position& pos, Color c) { return 0; }     // TODO
-static int knight_count(const Position& pos, Color c) { return 0; }     // TODO
-static int piece_count(const Position& pos, Color c) { return 0; }      // TODO: all pieces
+static int pawn_count(const Position& pos, Color c) {
+    int v = 0;
+    for (int s = 0; s < 64; s++)
+        if (pos.piece_on(Square(s)) == make_piece(c, PAWN)) v++;
+    return v;
+}
+static int queen_count(const Position& pos, Color c) {
+    int v = 0;
+    for (int s = 0; s < 64; s++)
+        if (pos.piece_on(Square(s)) == make_piece(c, QUEEN)) v++;
+    return v;
+}
+static int bishop_count(const Position& pos, Color c) {
+    int v = 0;
+    for (int s = 0; s < 64; s++)
+        if (pos.piece_on(Square(s)) == make_piece(c, BISHOP)) v++;
+    return v;
+}
+static int knight_count(const Position& pos, Color c) {
+    int v = 0;
+    for (int s = 0; s < 64; s++)
+        if (pos.piece_on(Square(s)) == make_piece(c, KNIGHT)) v++;
+    return v;
+}
+static int piece_count(const Position& pos, Color c) {
+    int v = 0;
+    for (int s = 0; s < 64; s++) {
+        Piece p = pos.piece_on(Square(s));
+        if (p != NO_PIECE && color_of(p) == c) v++;
+    }
+    return v;
+}
 // Non pawn material: sum of MG values of N+B+R+Q for given color
 static int non_pawn_material(const Position& pos, Color c) {
     int v = 0;
@@ -2851,8 +2876,22 @@ static int non_pawn_material(const Position& pos, Color c) {
     }
     return v;
 }
-static bool opposite_bishops(const Position& pos) { return false; }     // TODO
-static int candidate_passed(const Position& pos, Color c) { return 0; } // TODO
+static bool opposite_bishops(const Position& pos) {
+    int wb = 0, bb = 0;
+    int wcolor = -1, bcolor = -1;
+    for (int s = 0; s < 64; s++) {
+        Piece p = pos.piece_on(Square(s));
+        if (p == W_BISHOP) { wb++; wcolor = (file_of(Square(s)) + rank_of(Square(s))) % 2; }
+        if (p == B_BISHOP) { bb++; bcolor = (file_of(Square(s)) + rank_of(Square(s))) % 2; }
+    }
+    return wb == 1 && bb == 1 && wcolor != bcolor;
+}
+// candidate_passed for specific color — simplified: count white passers only
+// TODO: needs colorflip for black
+static int candidate_passed(const Position& pos, Color c) {
+    if (c == WHITE) return candidate_passed_total(pos);
+    return 0; // TODO: colorflip
+}
 
 // Stockfish material values used in scale factor
 constexpr int BishopValueMg = 825;
