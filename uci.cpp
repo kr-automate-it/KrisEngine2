@@ -63,10 +63,12 @@ static void parse_go(std::istringstream& is) {
     searchInfo.stopped.store(true);
     if (searchThread.joinable()) searchThread.join();
 
-    searchThread = std::thread([&]() {
+    searchThread = std::thread([&pos, &searchInfo]() {
         SearchResult result = search(pos, searchInfo);
-        std::string bmStr = "bestmove " + pos.move_to_uci(result.bestMove);
-        std::cout << bmStr << std::endl;
+        if (result.bestMove != MOVE_NONE)
+            std::cout << "bestmove " << pos.move_to_uci(result.bestMove) << std::endl;
+        else
+            std::cout << "bestmove 0000" << std::endl;
     });
 }
 
@@ -149,10 +151,13 @@ void uci_loop() {
         else if (token == "quit") {
             searchInfo.stopped.store(true);
             if (searchThread.joinable()) searchThread.join();
-            break;
+            return;
         }
         else if (token == "d") {
             std::cout << pos.fen() << std::endl;
         }
     }
+    // Cleanup: stop search and wait for thread
+    searchInfo.stopped.store(true);
+    if (searchThread.joinable()) searchThread.join();
 }
