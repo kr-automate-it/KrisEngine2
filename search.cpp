@@ -229,21 +229,21 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta,
 
     // === Pruning (non-PV, non-check) ===
     if (!inCheck && !pvNode) {
-        // Reverse Futility Pruning
-        if (depth <= 3 && eval - 110 * depth >= beta)
+        // Reverse Futility Pruning — extended to depth 8
+        if (depth <= 8 && eval - 80 * depth >= beta)
             return eval;
 
-        // Razoring
-        if (depth <= 2 && eval + 300 + 200 * depth < alpha) {
+        // Razoring — extended to depth 3
+        if (depth <= 3 && eval + 200 + 150 * depth < alpha) {
             int qScore = quiescence(pos, alpha - 1, alpha, info, ply);
             if (qScore < alpha) return qScore;
         }
 
-        // Null Move Pruning
+        // Null Move Pruning — stronger reduction
         if (doNull && depth >= 3 && eval >= beta) {
             U64 npm = pos.pieces(pos.side_to_move()) & ~pos.pieces(PAWN) & ~pos.pieces(KING);
             if (popcount(npm) >= 2) {
-                int R = 3 + depth / 4 + std::min((eval - beta) / 200, 3);
+                int R = 4 + depth / 3 + std::min((eval - beta) / 200, 3);
                 StateInfo newSt;
                 pos.do_null_move(newSt);
                 int score = -alpha_beta(pos, depth - R - 1, -beta, -beta + 1, info, ply + 1, false);
@@ -320,15 +320,36 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta,
         bool isCapture = pos.piece_on(move_to(m)) != NO_PIECE || move_type(m) == EN_PASSANT;
         bool isQuiet   = !isCapture && move_type(m) != PROMOTION;
 
-        // LMP
-        int lmpThreshold = 3 + depth * depth + (improving ? depth : 0);
-        if (!pvNode && !inCheck && isQuiet && depth <= 7 && legalMoves > lmpThreshold)
-            continue;
+        // === Move pruning (non-PV, non-check, not first move) ===
+        if (!pvNode && !inCheck && legalMoves > 1) {
 
-        // Futility pruning
-        if (!pvNode && !inCheck && isQuiet && depth <= 3 && legalMoves > 1
-            && eval + 200 * depth < alpha)
-            continue;
+            // LMP — extended to depth 10
+            if (isQuiet && depth <= 10) {
+                int lmpThreshold = (3 + depth * depth) / (2 - improving);
+                if (legalMoves > lmpThreshold)
+                    continue;
+            }
+
+            // Futility pruning — extended to depth 6
+            if (isQuiet && depth <= 6 && eval + 100 * depth + 50 < alpha)
+                continue;
+
+            // History pruning — prune quiet moves with very bad history
+            if (isQuiet && depth <= 4) {
+                int hist = history[pos.side_to_move()][move_from(m)][move_to(m)];
+                if (hist < -2000 * depth)
+                    continue;
+            }
+
+            // SEE pruning for captures
+            if (isCapture && depth <= 5) {
+                Piece cap = pos.piece_on(move_to(m));
+                Piece mov = pos.piece_on(move_from(m));
+                if (cap != NO_PIECE && mov != NO_PIECE
+                    && PieceValue[type_of(mov)] > PieceValue[type_of(cap)] + 200)
+                    continue;
+            }
+        }
 
         StateInfo newSt;
         pos.do_move(m, newSt);
@@ -346,16 +367,28 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta,
             score = -alpha_beta(pos, depth - 1 + ext, -beta, -alpha, info, ply + 1, true, m);
         } else {
             int reduction = 0;
-            if (legalMoves > 2 && depth >= 2 && !inCheck && !givesCheck) {
+            if (legalMoves > 1 && depth >= 2 && !inCheck && !givesCheck) {
                 if (isQuiet) {
                     reduction = lmrTable[std::min(depth, 63)][std::min(legalMoves, 63)];
                     if (!pvNode) reduction++;
                     if (!improving) reduction++;
-                    if (legalMoves > 10) reduction++;
+                    // Extra reduction for very late moves
+                    if (legalMoves > 8) reduction++;
+                    if (legalMoves > 16) reduction++;
+                    // Eval-based: deeper reduction when eval far below alpha
+                    if (eval + 100 < alpha) reduction++;
+                    // History-based reduction
                     int hist = history[pos.side_to_move()][move_from(m)][move_to(m)];
-                    reduction -= std::max(-2, std::min(2, hist / 5000));
-                } else if (isCapture && legalMoves > 5) {
-                    reduction = 1;
+                    reduction -= std::max(-3, std::min(3, hist / 4000));
+                    // Reduce killers/countermove less
+                    if (ply < 128 && (m == killers[ply][0] || m == killers[ply][1]))
+                        reduction--;
+                    if (m == counterMove)
+                        reduction--;
+                } else if (isCapture) {
+                    // LMR for captures too
+                    if (legalMoves > 4) reduction = 1;
+                    if (legalMoves > 10) reduction = 2;
                 }
                 reduction = std::max(0, std::min(reduction, depth - 1));
             }
@@ -460,7 +493,7 @@ SearchResult search(Position& pos, SearchInfo& info) {
                 std::chrono::steady_clock::now() - info.startTime).count();
 
             // Don't start new depth after using > 30% of time per move
-            if (info.timeLimit > 0 && elapsed > info.timeLimit / 30) break;
+            if (info.timeLimit > 0 && elapsed > info.timeLimit / 3) break;
             // No time limit: max 30 seconds total
             if (info.timeLimit <= 0 && elapsed > 30000) break;
         }
