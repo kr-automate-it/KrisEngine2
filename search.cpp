@@ -51,7 +51,7 @@ static bool time_up(SearchInfo& info) {
     if (info.stopped.load(std::memory_order_relaxed)) return true;
 
     static thread_local int checkCounter = 0;
-    if (++checkCounter < 2048) return false;
+    if (++checkCounter < 128) return false;
     checkCounter = 0;
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -373,9 +373,13 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta,
             score = -alpha_beta(pos, depth - 1 + ext - reduction, -alpha - 1, -alpha,
                                  info, ply + 1, true, m);
 
+            if (info.stopped.load(std::memory_order_relaxed)) { pos.undo_move(m); return 0; }
+
             // Re-search if reduced and failed high
             if (score > alpha && reduction > 0)
                 score = -alpha_beta(pos, depth - 1 + ext, -alpha - 1, -alpha, info, ply + 1, true, m);
+
+            if (info.stopped.load(std::memory_order_relaxed)) { pos.undo_move(m); return 0; }
 
             // Full window re-search
             if (score > alpha && score < beta)
