@@ -516,14 +516,17 @@ SearchResult search(Position& pos, SearchInfo& info) {
             break;
         }
 
-        if (info.stopped.load(std::memory_order_relaxed)) break;
-
-        // Get best move from TT
-        bool ttHit;
-        TTEntry* tte = TT.probe(pos.key(), ttHit);
-        if (ttHit && tte->move != MOVE_NONE)
-            result.bestMove = tte->move;
-        result.score = score;
+        // Always update best move from TT (even if stopped mid-search)
+        {
+            bool ttHit;
+            TTEntry* tte = TT.probe(pos.key(), ttHit);
+            if (ttHit && tte->move != MOVE_NONE)
+                result.bestMove = tte->move;
+        }
+        if (!info.stopped.load(std::memory_order_relaxed))
+            result.score = score;
+        else
+            break;
 
         // UCI output
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(

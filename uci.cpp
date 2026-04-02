@@ -33,7 +33,7 @@ static void parse_go(std::istringstream& is) {
         else if (token == "infinite")  infinite = true;
     }
 
-    searchInfo.maxDepth = depth;
+    searchInfo.maxDepth = std::min(depth, 13); // temp safety cap
 
     // Debug: log go parameters
     std::cerr << "go: wtime=" << wtime << " btime=" << btime
