@@ -330,13 +330,18 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta,
             score = -alpha_beta(pos, depth - 1 + ext, -beta, -alpha, info, ply + 1, true, m);
         } else {
             int reduction = 0;
-            if (legalMoves > 3 && depth >= 3 && !inCheck && !givesCheck && isQuiet) {
-                reduction = lmrTable[std::min(depth, 63)][std::min(legalMoves, 63)];
-                if (!pvNode) reduction++;
-                if (!improving) reduction++;
-                int hist = history[pos.side_to_move()][move_from(m)][move_to(m)];
-                reduction -= std::max(-2, std::min(2, hist / 5000));
-                reduction = std::max(0, std::min(reduction, depth - 2));
+            if (legalMoves > 2 && depth >= 2 && !inCheck && !givesCheck) {
+                if (isQuiet) {
+                    reduction = lmrTable[std::min(depth, 63)][std::min(legalMoves, 63)];
+                    if (!pvNode) reduction++;
+                    if (!improving) reduction++;
+                    if (legalMoves > 10) reduction++;
+                    int hist = history[pos.side_to_move()][move_from(m)][move_to(m)];
+                    reduction -= std::max(-2, std::min(2, hist / 5000));
+                } else if (isCapture && legalMoves > 5) {
+                    reduction = 1;
+                }
+                reduction = std::max(0, std::min(reduction, depth - 1));
             }
 
             // Zero-window
@@ -496,8 +501,12 @@ SearchResult search(Position& pos, SearchInfo& info) {
 
         if (std::abs(score) > VALUE_MATE - 100) break;
 
-        // Time management: simple — stop if used > 50% time
+        // Time management
         if (info.timeLimit > 0 && elapsed > info.timeLimit / 2) break;
+
+        // Safety: if no time limit set and depth took > 10s, stop
+        // (prevents hanging on "go depth 64" from startpos)
+        if (info.timeLimit == 0 && elapsed > 10000 && depth >= 6) break;
     }
 
     // Fallback
