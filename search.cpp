@@ -6,6 +6,7 @@
 #include <iostream>
 #include <cstring>
 #include <cmath>
+#include <thread>
 
 // === LMR Table ===
 static int lmrTable[64][64];
@@ -45,11 +46,15 @@ static Move countermoves[PIECE_NB][SQUARE_NB];
 
 // === Time management ===
 static bool time_up(SearchInfo& info) {
-    if (info.timeLimit <= 0) return false;
-    if ((info.nodes.load(std::memory_order_relaxed) & 1023) != 0) return false;
+    static thread_local int checkCounter = 0;
+    if (++checkCounter < 4096) return false;
+    checkCounter = 0;
+
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - info.startTime).count();
-    return elapsed >= info.timeLimit;
+    if (info.timeLimit > 0 && elapsed >= info.timeLimit) return true;
+    if (info.timeLimit <= 0 && elapsed > 30000) return true;
+    return false;
 }
 
 // === Move scoring ===
@@ -421,8 +426,29 @@ SearchResult search(Position& pos, SearchInfo& info) {
     std::memset(killers, 0, sizeof(killers));
     TT.new_search();
 
+    // Hard timer: stop search after timeLimit (separate check)
+    std::thread timer;
+    if (info.timeLimit > 0) {
+        timer = std::thread([&info]() {
+            std::this_thread::sleep_for(std::chrono::milliseconds(info.timeLimit));
+            info.stopped.store(true);
+        });
+        timer.detach();
+    }
+
     for (int depth = 1; depth <= info.maxDepth; depth++) {
         info.depth = depth;
+
+        // Time guard: estimate if next depth will fit in remaining time
+        // Next depth takes ~4x current. Don't start if 4*elapsed > timeLimit.
+        {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - info.startTime).count();
+            // Pessimistic: don't start depth if we've already used >5% of time
+            // This ensures bestmove is always returned
+            if (info.timeLimit > 0 && depth > 4 && elapsed > info.timeLimit / 20) break;
+            if (info.timeLimit <= 0 && elapsed > 5000 && depth > 6) break;
+        }
 
         // Aspiration windows
         int alpha, beta;
@@ -498,6 +524,7 @@ SearchResult search(Position& pos, SearchInfo& info) {
                   << " time " << elapsed
                   << " pv " << pvStr
                   << std::endl;
+        std::cout.flush();
 
         if (std::abs(score) > VALUE_MATE - 100) break;
 

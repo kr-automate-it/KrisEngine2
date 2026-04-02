@@ -69,6 +69,7 @@ static void parse_go(std::istringstream& is) {
             std::cout << "bestmove " << pos.move_to_uci(result.bestMove) << std::endl;
         else
             std::cout << "bestmove 0000" << std::endl;
+        std::cout.flush();
     });
 }
 
