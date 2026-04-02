@@ -1621,6 +1621,329 @@ static int doubled_isolated(const Position& pos, Square sq) {
     return 0;
 }
 
+// Pawn attacks span: can an enemy pawn on adjacent file attack this square?
+// Checks for enemy pawns ahead that are not backward and not blocked
+static int pawn_attacks_span(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    for (int y = 0; y < sy; y++) {
+        for (int dx = -1; dx <= 1; dx += 2) {
+            int ax = sx + dx;
+            if (ax < 0 || ax > 7) continue;
+            if (pos.piece_on(make_square(ax, y)) != B_PAWN) continue;
+            if (y == sy - 1) return 1; // directly adjacent
+            // Check if this enemy pawn can advance (not blocked by our pawn, not backward)
+            if (pos.piece_on(make_square(ax, y + 1)) == W_PAWN) continue;
+            // TODO: backward check from black perspective (simplified: assume can advance)
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Outpost square: rank 4-6, supported by our pawn, no enemy pawn attacks span
+static int outpost_square(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    int r = rank_of(sq);
+    if (r < 3 || r > 5) return 0; // ranks 4-6 (0-indexed: 3-5)
+    int sx = file_of(sq), sy = rank_of(sq);
+    // Must be supported by our pawn
+    bool sup = false;
+    if (sx > 0 && sy < 7 && pos.piece_on(make_square(sx - 1, sy + 1)) == W_PAWN) sup = true;
+    if (sx < 7 && sy < 7 && pos.piece_on(make_square(sx + 1, sy + 1)) == W_PAWN) sup = true;
+    if (!sup) return 0;
+    // No enemy pawn can attack this square
+    if (pawn_attacks_span(pos, sq)) return 0;
+    return 1;
+}
+
+// Outpost: knight or bishop on an outpost square
+static int outpost(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    Piece p = pos.piece_on(sq);
+    if (p != W_KNIGHT && p != W_BISHOP) return 0;
+    if (!outpost_square(pos, sq)) return 0;
+    return 1;
+}
+
+// Reachable outpost: knight/bishop that can reach an outpost square in one move
+// Returns 2 if outpost is pawn-supported, 1 otherwise, 0 if none reachable
+static int reachable_outpost(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    Piece p = pos.piece_on(sq);
+    if (p != W_KNIGHT && p != W_BISHOP) return 0;
+
+    int v = 0;
+    for (int y = 2; y < 5; y++) {       // ranks 3-5 (0-indexed) = outpost ranks
+        for (int x = 0; x < 8; x++) {
+            Square target = make_square(x, y);
+            // Target must be empty or enemy
+            Piece tp = pos.piece_on(target);
+            if (tp != NO_PIECE && color_of(tp) == WHITE) continue;
+            if (!outpost_square(pos, target)) continue;
+
+            bool canReach = false;
+            if (p == W_KNIGHT && knight_attack(pos, target, sq)) canReach = true;
+            if (p == W_BISHOP && bishop_xray_attack(pos, target, sq)) canReach = true;
+
+            if (canReach) {
+                bool pawnSup = (x > 0 && y < 7 && pos.piece_on(make_square(x - 1, y + 1)) == W_PAWN)
+                            || (x < 7 && y < 7 && pos.piece_on(make_square(x + 1, y + 1)) == W_PAWN);
+                v = std::max(v, pawnSup ? 2 : 1);
+            }
+        }
+    }
+    return v;
+}
+
+// Minor behind pawn: knight/bishop with any pawn directly in front
+static int minor_behind_pawn(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    Piece p = pos.piece_on(sq);
+    if (p != W_KNIGHT && p != W_BISHOP) return 0;
+    int sy = rank_of(sq);
+    if (sy == 0) return 0;
+    Piece ahead = pos.piece_on(make_square(file_of(sq), sy - 1));
+    if (type_of(ahead) == PAWN) return 1; // any color pawn
+    return 0;
+}
+
+// Bishop pawns: bad bishop penalty — pawns on same color × (1 + blocked center pawns)
+// Also penalized more if bishop is not on a pawn-attacked square (10.57 ELO)
+static int bishop_pawns(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_BISHOP) return 0;
+    int color = (file_of(sq) + rank_of(sq)) % 2;
+    int sameColor = 0, blocked = 0;
+    for (int s = 0; s < 64; s++) {
+        if (pos.piece_on(Square(s)) != W_PAWN) continue;
+        int fx = file_of(Square(s)), fy = rank_of(Square(s));
+        if ((fx + fy) % 2 == color) sameColor++;
+        // Blocked center pawn (files C-F = 2-5)
+        if (fx >= 2 && fx <= 5 && fy > 0
+            && pos.piece_on(make_square(fx, fy - 1)) != NO_PIECE)
+            blocked++;
+    }
+    int notAttacked = (pawn_attack(pos, sq) > 0) ? 0 : 1;
+    return sameColor * (blocked + notAttacked);
+}
+
+// Rook on file: 2 = open file (no pawns), 1 = semi-open (no our pawns), 0 = closed
+static int rook_on_file(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_ROOK) return 0;
+    int sx = file_of(sq);
+    int open = 1;
+    for (int y = 0; y < 8; y++) {
+        if (pos.piece_on(make_square(sx, y)) == W_PAWN) return 0; // closed
+        if (pos.piece_on(make_square(sx, y)) == B_PAWN) open = 0; // semi-open
+    }
+    return open + 1; // 2=open, 1=semi-open
+}
+
+// Trapped rook: rook on closed file, low mobility, trapped by own king
+static int trapped_rook(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_ROOK) return 0;
+    if (rook_on_file(pos, sq)) return 0;
+    if (mobility(pos, sq) > 3) return 0;
+    // Find our king
+    int kx = -1;
+    for (int s = 0; s < 64; s++) {
+        if (pos.piece_on(Square(s)) == W_KING) {
+            kx = file_of(Square(s));
+            break;
+        }
+    }
+    if (kx < 0) return 0;
+    int rx = file_of(sq);
+    // King on same side as rook, rook on wrong side of king
+    if ((kx < 4) != (rx < kx)) return 0;
+    return 1;
+}
+
+// Weak queen: queen exposed to relative pin or discovered attack
+// Checks if enemy rook (on straight) or bishop (on diagonal) is behind exactly 1 piece
+static int weak_queen(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_QUEEN) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+
+    static const int dx[] = {-1, 0, 1, -1, 1, -1, 0, 1};
+    static const int dy[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+
+    for (int i = 0; i < 8; i++) {
+        int count = 0;
+        for (int d = 1; d < 8; d++) {
+            int nx = sx + d * dx[i], ny = sy + d * dy[i];
+            if (nx < 0 || nx > 7 || ny < 0 || ny > 7) break;
+            Piece p = pos.piece_on(make_square(nx, ny));
+            bool isDiag = (dx[i] != 0 && dy[i] != 0);
+            if (p == B_ROOK && !isDiag && count == 1) return 1;
+            if (p == B_BISHOP && isDiag && count == 1) return 1;
+            if (p != NO_PIECE) count++;
+        }
+    }
+    return 0;
+}
+
+// King distance: Chebyshev distance from square to our (white) king
+static int king_distance(const Position& pos, Square sq) {
+    int kx = -1, ky = -1;
+    for (int s = 0; s < 64; s++) {
+        if (pos.piece_on(Square(s)) == W_KING) {
+            kx = file_of(Square(s)); ky = rank_of(Square(s)); break;
+        }
+    }
+    if (kx < 0) return 0;
+    return std::max(std::abs(file_of(sq) - kx), std::abs(rank_of(sq) - ky));
+}
+
+// King protector: minor piece distance to own king (penalty for being far)
+static int king_protector(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    Piece p = pos.piece_on(sq);
+    if (p != W_KNIGHT && p != W_BISHOP) return 0;
+    return king_distance(pos, sq);
+}
+
+// Long diagonal bishop: bishop on long diagonal (a1-h8 or h1-a8) that can see center
+// Must be on outer 3 squares of diagonal, no pawns blocking view to center
+static int long_diagonal_bishop(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_BISHOP) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    // Must be on a1-h8 diagonal (x==y) or h1-a8 diagonal (x==7-y)
+    if (sx - sy != 0 && sx - (7 - sy) != 0) return 0;
+    // Must be on outer part (min(x, 7-x) <= 2)
+    if (std::min(sx, 7 - sx) > 2) return 0;
+    // Walk toward center — no pawns blocking
+    int x1 = sx, y1 = sy;
+    for (int i = std::min(sx, 7 - sx); i < 4; i++) {
+        Piece p = pos.piece_on(make_square(x1, y1));
+        if (p == W_PAWN || p == B_PAWN) return 0;
+        x1 += (x1 < 4) ? 1 : -1;
+        y1 += (y1 < 4) ? 1 : -1;
+    }
+    return 1;
+}
+
+// Outpost total: combined outpost bonus for knights/bishops (12.05 ELO)
+// Knight on outpost = 4, bishop = 3. Edge knight with no targets = 2.
+// Reachable outpost for knight only = 1.
+static int outpost_total(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    Piece p = pos.piece_on(sq);
+    if (p != W_KNIGHT && p != W_BISHOP) return 0;
+    bool isKnight = (p == W_KNIGHT);
+
+    if (!outpost(pos, sq)) {
+        if (!isKnight) return 0;
+        if (!reachable_outpost(pos, sq)) return 0;
+        return 1; // knight can reach outpost
+    }
+
+    // Knight on edge file (a,b or g,h) with few targets
+    if (isKnight && (file_of(sq) < 2 || file_of(sq) > 5)) {
+        int sx = file_of(sq), sy = rank_of(sq);
+        bool enemyAttacked = false;
+        int sameSideEnemies = 0;
+        static const int kdx[] = {-2, -1, 1, 2, 2, 1, -1, -2};
+        static const int kdy[] = {-1, -2, -2, -1, 1, 2, 2, 1};
+        for (int i = 0; i < 8; i++) {
+            int nx = sx + kdx[i], ny = sy + kdy[i];
+            if (nx < 0 || nx > 7 || ny < 0 || ny > 7) continue;
+            Piece tp = pos.piece_on(make_square(nx, ny));
+            if (tp != NO_PIECE && color_of(tp) == BLACK && type_of(tp) >= KNIGHT)
+                enemyAttacked = true;
+        }
+        for (int s = 0; s < 64; s++) {
+            Piece ep = pos.piece_on(Square(s));
+            if (ep == NO_PIECE || color_of(ep) != BLACK) continue;
+            if (type_of(ep) < KNIGHT) continue;
+            int ex = file_of(Square(s));
+            if ((ex < 4 && sx < 4) || (ex >= 4 && sx >= 4))
+                sameSideEnemies++;
+        }
+        if (!enemyAttacked && sameSideEnemies <= 1) return 2;
+    }
+
+    return isKnight ? 4 : 3;
+}
+
+// Rook on queen file: rook on same file as any queen
+static int rook_on_queen_file(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_ROOK) return 0;
+    int sx = file_of(sq);
+    for (int y = 0; y < 8; y++) {
+        Piece p = pos.piece_on(make_square(sx, y));
+        if (type_of(p) == QUEEN) return 1;
+    }
+    return 0;
+}
+
+// Bishop xray pawns: count enemy pawns on same diagonal as our bishop
+static int bishop_xray_pawns(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_BISHOP) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    int count = 0;
+    for (int s = 0; s < 64; s++) {
+        if (pos.piece_on(Square(s)) != B_PAWN) continue;
+        if (std::abs(file_of(Square(s)) - sx) == std::abs(rank_of(Square(s)) - sy))
+            count++;
+    }
+    return count;
+}
+
+// Rook on king ring: rook on same file as enemy king ring (but not already counted as attacker)
+static int rook_on_king_ring(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_ROOK) return 0;
+    if (king_attackers_count(pos, sq) > 0) return 0;
+    int sx = file_of(sq);
+    for (int y = 0; y < 8; y++) {
+        if (king_ring(pos, make_square(sx, y))) return 1;
+    }
+    return 0;
+}
+
+// Queen infiltration: queen on weak square in enemy camp (rank 5+)
+// Can't be kicked by pawns now or later
+static int queen_infiltration(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_QUEEN) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    if (sy > 3) return 0; // must be in enemy half (rank 5+ from white = y <= 3)
+    // Not attacked by adjacent enemy pawns
+    if (sx > 0 && sy > 0 && pos.piece_on(make_square(sx - 1, sy - 1)) == B_PAWN) return 0;
+    if (sx < 7 && sy > 0 && pos.piece_on(make_square(sx + 1, sy - 1)) == B_PAWN) return 0;
+    // No enemy pawn can attack this square in future
+    if (pawn_attacks_span(pos, sq)) return 0;
+    return 1;
+}
+
+// Bishop on king ring: bishop on diagonal of enemy king ring (not already attacker)
+static int bishop_on_king_ring(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_BISHOP) return 0;
+    if (king_attackers_count(pos, sq) > 0) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    // Check diagonals for king ring squares
+    static const int dx[] = {-1, 1, -1, 1};
+    static const int dy[] = {-1, -1, 1, 1};
+    for (int i = 0; i < 4; i++) {
+        for (int d = 1; d < 8; d++) {
+            int nx = sx + d * dx[i], ny = sy + d * dy[i];
+            if (nx < 0 || nx > 7 || ny < 0 || ny > 7) break;
+            if (king_ring(pos, make_square(nx, ny))) return 1;
+            if (pos.piece_on(make_square(nx, ny)) != NO_PIECE) break;
+        }
+    }
+    return 0;
+}
+
 // === Sub-components (TODO: implement each) ===
 
 // Piece value bonus: material values (Stockfish classical)
@@ -1740,7 +2063,38 @@ static int pawns_mg(const Position& pos) {
     }
     return v;
 }
-static int pieces_mg(const Position& pos) { return 0; }      // TODO
+// Pieces MG: bonuses/penalties for N/B/R/Q placement
+static int pieces_mg(const Position& pos) {
+    static const int outpostBonus[] = {0, 31, -7, 30, 56};
+    static const int rookFileBonus[] = {0, 19, 48};
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Square s = Square(sq);
+        Piece p = pos.piece_on(s);
+        if (p == NO_PIECE || color_of(p) != WHITE) continue;
+        PieceType pt = type_of(p);
+        if (pt < KNIGHT || pt > QUEEN) continue;
+
+        int ot = outpost_total(pos, s);
+        if (ot >= 0 && ot <= 4) v += outpostBonus[ot];
+        v += 18 * minor_behind_pawn(pos, s);
+        v -= 3 * bishop_pawns(pos, s);
+        v -= 4 * bishop_xray_pawns(pos, s);
+        v += 6 * rook_on_queen_file(pos, s);
+        v += 16 * rook_on_king_ring(pos, s);
+        v += 24 * bishop_on_king_ring(pos, s);
+        int rf = rook_on_file(pos, s);
+        if (rf >= 0 && rf <= 2) v += rookFileBonus[rf];
+        // Trapped rook: worse if can't castle
+        // TODO: check castling rights properly
+        v -= trapped_rook(pos, s) * 55; // simplified: assume can castle
+        v -= 56 * weak_queen(pos, s);
+        v -= 2 * queen_infiltration(pos, s);
+        v -= (pt == KNIGHT ? 8 : 6) * king_protector(pos, s);
+        v += 45 * long_diagonal_bishop(pos, s);
+    }
+    return v;
+}
 // Mobility bonus tables indexed by [piece_type][mobility_count]
 static const int MobilityBonusMG[4][28] = {
     // Knight (0-8)
@@ -1922,7 +2276,33 @@ static int pawns_eg(const Position& pos) {
     }
     return v;
 }
-static int pieces_eg(const Position& pos) { return 0; }      // TODO
+// Pieces EG: endgame bonuses/penalties for N/B/R/Q
+static int pieces_eg(const Position& pos) {
+    static const int outpostBonus[] = {0, 22, 36, 23, 36};
+    static const int rookFileBonus[] = {0, 7, 29};
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Square s = Square(sq);
+        Piece p = pos.piece_on(s);
+        if (p == NO_PIECE || color_of(p) != WHITE) continue;
+        PieceType pt = type_of(p);
+        if (pt < KNIGHT || pt > QUEEN) continue;
+
+        int ot = outpost_total(pos, s);
+        if (ot >= 0 && ot <= 4) v += outpostBonus[ot];
+        v += 3 * minor_behind_pawn(pos, s);
+        v -= 7 * bishop_pawns(pos, s);
+        v -= 5 * bishop_xray_pawns(pos, s);
+        v += 11 * rook_on_queen_file(pos, s);
+        int rf = rook_on_file(pos, s);
+        if (rf >= 0 && rf <= 2) v += rookFileBonus[rf];
+        v -= trapped_rook(pos, s) * 13; // simplified
+        v -= 15 * weak_queen(pos, s);
+        v += 14 * queen_infiltration(pos, s);
+        v -= 9 * king_protector(pos, s);
+    }
+    return v;
+}
 // Mobility EG
 static int mobility_eg(const Position& pos) {
     int v = 0;
