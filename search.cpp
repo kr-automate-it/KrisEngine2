@@ -23,6 +23,7 @@ static void init_lmr() {
 static Move killers[128][2];
 
 static void store_killer(int ply, Move m) {
+    if (ply >= 128) return;
     if (m != killers[ply][0]) {
         killers[ply][1] = killers[ply][0];
         killers[ply][0] = m;
@@ -196,6 +197,9 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta,
 
     bool pvNode = (beta - alpha > 1);
     bool inCheck = pos.in_check();
+
+    // Hard ply limit — prevent stack overflow from extensions
+    if (ply >= 127) return Eval::evaluate(pos);
 
     // Qsearch at leaf
     if (depth <= 0) return quiescence(pos, alpha, beta, info, ply);
@@ -497,7 +501,7 @@ SearchResult search(Position& pos, SearchInfo& info) {
             if (info.stopped.load(std::memory_order_relaxed)) break;
 
             if (score <= alpha) {
-                beta = (alpha + beta) / 2;
+                // Fail-low: widen downward only, don't touch beta
                 alpha = std::max(-VALUE_INFINITE, score - aspDelta);
                 aspDelta *= 2;
                 if (aspDelta > 500) alpha = -VALUE_INFINITE;
@@ -527,25 +531,29 @@ SearchResult search(Position& pos, SearchInfo& info) {
         int64_t nodeCount = info.nodes.load();
         int64_t nps = (elapsed > 0) ? (nodeCount * 1000 / elapsed) : nodeCount;
 
-        // Extract PV from TT
+        // Extract PV from TT — use copy to avoid corrupting main position
         std::string pvStr;
-        StateInfo pvStates[64];
-        Move pvMoves[64];
-        int pvLen = 0;
-        for (int i = 0; i < depth && i < 60; i++) {
-            bool hit;
-            TTEntry* e = TT.probe(pos.key(), hit);
-            if (!hit || e->move == MOVE_NONE) break;
-            Move pvMove = e->move;
-            if (pos.piece_on(move_from(pvMove)) == NO_PIECE) break;
-            if (!pos.is_legal(pvMove)) break;
-            pvStr += pos.move_to_uci(pvMove) + " ";
-            pvMoves[pvLen] = pvMove;
-            pos.do_move(pvMove, pvStates[pvLen]);
-            pvLen++;
+        {
+            Position pvPos(pos); // work on copy
+            StateInfo pvStates[64];
+            U64 seen[64]; int seenCount = 0;
+            for (int i = 0; i < depth && i < 40; i++) {
+                bool hit;
+                TTEntry* e = TT.probe(pvPos.key(), hit);
+                if (!hit || e->move == MOVE_NONE) break;
+                Move pvMove = e->move;
+                if (pvPos.piece_on(move_from(pvMove)) == NO_PIECE) break;
+                if (!pvPos.is_legal(pvMove)) break;
+                // Cycle detection
+                bool cycle = false;
+                for (int j = 0; j < seenCount; j++)
+                    if (seen[j] == pvPos.key()) { cycle = true; break; }
+                if (cycle) break;
+                seen[seenCount++] = pvPos.key();
+                pvStr += pvPos.move_to_uci(pvMove) + " ";
+                pvPos.do_move(pvMove, pvStates[i]);
+            }
         }
-        for (int i = pvLen - 1; i >= 0; i--)
-            pos.undo_move(pvMoves[i]);
 
         std::cout << "info depth " << depth
                   << " score cp " << score
