@@ -2461,15 +2461,14 @@ static int winnable(const Position& pos) {
          - 110;
 }
 
-// Winnable total MG: adjusts MG eval based on complexity
-// v = current MG eval (before winnable)
+// Winnable total MG: reduces eval toward 0 when position is hard to win
+// sign(v) * max(min(winnable+50, 0), -abs(v))
+// If winnable+50 >= 0: no adjustment (position complex enough)
+// If winnable+50 < 0: reduce eval, capped at -abs(v) (can't flip sign)
 static int winnable_total_mg(const Position& pos, int v) {
+    int sign = (v > 0) ? 1 : (v < 0) ? -1 : 0;
     int w = winnable(pos);
-    // Clamp: if eval and winnable have same sign, apply; otherwise reduce
-    if (v > 0)
-        return std::max(w, -std::abs(v)) * std::abs(v) / 256;
-    else
-        return std::min(w, std::abs(v)) * std::abs(v) / 256;
+    return sign * std::max(std::min(w + 50, 0), -std::abs(v));
 }
 
 // Middle game evaluation — all MG terms combined
@@ -2663,13 +2662,12 @@ static int king_eg(const Position& pos) {
     v += king_danger(pos) / 16;           // linear (not quadratic) in EG
     return v;
 }
-// Winnable total EG: adjusts EG eval based on complexity
+// Winnable total EG: sign(v) * max(winnable, -abs(v))
+// No +50 bias — EG is always adjusted (more aggressive than MG)
 static int winnable_total_eg(const Position& pos, int v) {
+    int sign = (v > 0) ? 1 : (v < 0) ? -1 : 0;
     int w = winnable(pos);
-    if (v > 0)
-        return std::max(w, -std::abs(v)) * std::abs(v) / 256;
-    else
-        return std::min(w, std::abs(v)) * std::abs(v) / 256;
+    return sign * std::max(w, -std::abs(v));
 }
 
 // End game evaluation — all EG terms combined
