@@ -47,17 +47,21 @@ static Move countermoves[PIECE_NB][SQUARE_NB];
 
 // === Time management ===
 static bool time_up(SearchInfo& info) {
-    // Timer thread sets info.stopped — check it frequently
     if (info.stopped.load(std::memory_order_relaxed)) return true;
+    if (info.timeLimit <= 0) return false;
 
-    static thread_local int checkCounter = 0;
-    if (++checkCounter < 128) return false;
-    checkCounter = 0;
+    // Check clock periodically — balance speed vs responsiveness
+    static thread_local int64_t nextCheck = 0;
+    int64_t nodes = info.nodes.load(std::memory_order_relaxed);
+    if (nodes < nextCheck) return false;
+    nextCheck = nodes + 1;
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - info.startTime).count();
-    if (info.timeLimit > 0 && elapsed >= info.timeLimit) return true;
-    if (info.timeLimit <= 0 && elapsed > 30000) return true;
+    if (elapsed >= info.timeLimit) {
+        info.stopped.store(true);
+        return true;
+    }
     return false;
 }
 
@@ -96,6 +100,7 @@ static int move_score(const Position& pos, Move m, Move ttMove, int ply, Move co
 
 static int quiescence(Position& pos, int alpha, int beta, SearchInfo& info, int ply) {
     if (info.stopped.load(std::memory_order_relaxed)) return 0;
+    if (time_up(info)) { info.stopped.store(true); return 0; }
 
     info.nodes.fetch_add(1, std::memory_order_relaxed);
 
@@ -177,21 +182,9 @@ static int quiescence(Position& pos, int alpha, int beta, SearchInfo& info, int 
 static int alpha_beta(Position& pos, int depth, int alpha, int beta,
                        SearchInfo& info, int ply, bool doNull = true, Move prevMove = MOVE_NONE) {
     // Check stopped FIRST (set by timer or UCI stop command)
+    info.nodes.fetch_add(1, std::memory_order_relaxed);
     if (info.stopped.load(std::memory_order_relaxed)) return 0;
-    // Periodic time check
-    {
-        static thread_local int tc = 0;
-        if (++tc >= 2048) {
-            tc = 0;
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - info.startTime).count();
-            if ((info.timeLimit > 0 && elapsed >= info.timeLimit)
-                || (info.timeLimit <= 0 && elapsed > 30000)) {
-                info.stopped.store(true);
-                return 0;
-            }
-        }
-    }
+    if (time_up(info)) return 0;
 
     bool pvNode = (beta - alpha > 1);
     bool inCheck = pos.in_check();
@@ -201,8 +194,6 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta,
 
     // Qsearch at leaf
     if (depth <= 0) return quiescence(pos, alpha, beta, info, ply);
-
-    info.nodes.fetch_add(1, std::memory_order_relaxed);
 
     // Draw detection
     if (ply > 0 && pos.is_draw()) return 0;
@@ -460,16 +451,6 @@ SearchResult search(Position& pos, SearchInfo& info) {
     std::memset(killers, 0, sizeof(killers));
     TT.new_search();
 
-    // Hard timer: stop search after timeLimit (separate check)
-    std::thread timer;
-    if (info.timeLimit > 0) {
-        timer = std::thread([&info]() {
-            std::this_thread::sleep_for(std::chrono::milliseconds(info.timeLimit));
-            info.stopped.store(true);
-        });
-        timer.detach();
-    }
-
     for (int depth = 1; depth <= info.maxDepth; depth++) {
         info.depth = depth;
 
@@ -478,12 +459,10 @@ SearchResult search(Position& pos, SearchInfo& info) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - info.startTime).count();
 
-            // Hard rule: if we've used ANY measurable time and remaining < 10x elapsed, stop
-            if (info.timeLimit > 0 && elapsed > 0 && depth > 6) {
-                if (elapsed * 100 > info.timeLimit) break;
-            }
-            // No time limit: max 5 seconds total
-            if (info.timeLimit <= 0 && elapsed > 5000) break;
+            // Simple: don't start new depth after using > 3% of time
+            if (info.timeLimit > 0 && elapsed > info.timeLimit / 30) break;
+            // No time limit: max 30 seconds total
+            if (info.timeLimit <= 0 && elapsed > 30000) break;
         }
 
         // Aspiration windows
@@ -499,7 +478,9 @@ SearchResult search(Position& pos, SearchInfo& info) {
         int aspDelta = 25;
         int score;
         while (true) {
+            std::cerr << "ASP d=" << depth << " a=" << alpha << " b=" << beta << " n=" << info.nodes.load() << std::endl;
             score = alpha_beta(pos, depth, alpha, beta, info, 0, true);
+            std::cerr << "ASP ret=" << score << " s=" << info.stopped.load() << " n=" << info.nodes.load() << std::endl;
             if (info.stopped.load(std::memory_order_relaxed)) break;
 
             if (score <= alpha) {
