@@ -478,9 +478,7 @@ SearchResult search(Position& pos, SearchInfo& info) {
         int aspDelta = 25;
         int score;
         while (true) {
-            std::cerr << "ASP d=" << depth << " a=" << alpha << " b=" << beta << " n=" << info.nodes.load() << std::endl;
             score = alpha_beta(pos, depth, alpha, beta, info, 0, true);
-            std::cerr << "ASP ret=" << score << " s=" << info.stopped.load() << " n=" << info.nodes.load() << std::endl;
             if (info.stopped.load(std::memory_order_relaxed)) break;
 
             if (score <= alpha) {

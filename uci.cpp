@@ -100,9 +100,10 @@ static void parse_position(std::istringstream& is) {
         pos.set(fen);
     }
 
-    // Apply moves
+    // Apply moves — stateIdx must be static to preserve StateInfo chain
     static StateInfo states[1024];
-    int stateIdx = 0;
+    static int stateIdx = 0;
+    stateIdx = 0; // reset for new position
     while (is >> token) {
         Move m = pos.parse_uci(token);
         if (m != MOVE_NONE) {
