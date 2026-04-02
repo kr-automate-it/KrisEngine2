@@ -1,4 +1,5 @@
 #include "position.h"
+#include "zobrist.h"
 #include <sstream>
 
 // === Piece manipulation ===
@@ -140,15 +141,27 @@ void Position::set(const std::string& fen) {
 
     st_->captured = NO_PIECE;
 
-    // TODO: Zobrist hash computation
-    st_->key = 0;
-    st_->pawnKey = 0;
+    // Zobrist hash from scratch
+    U64 h = 0;
+    U64 ph = 0;
+    for (int s = 0; s < 64; s++) {
+        if (board_[s] != NO_PIECE) {
+            h ^= Zobrist::psq[board_[s]][s];
+            if (type_of(board_[s]) == PAWN)
+                ph ^= Zobrist::psq[board_[s]][s];
+        }
+    }
+    if (sideToMove_ == BLACK) h ^= Zobrist::side;
+    h ^= Zobrist::castling[st_->castling];
+    if (st_->epSquare != SQ_NONE)
+        h ^= Zobrist::enpassant[file_of(st_->epSquare)];
+    st_->key = h;
+    st_->pawnKey = ph;
 
-    // Incremental PSQ
+    // Incremental PSQ — TODO: compute from PSQT tables
     st_->psqMG = 0;
     st_->psqEG = 0;
     st_->gamePhase = 0;
-    // TODO: compute from PSQ tables
 
     // Compute in_check
     st_->inCheck = compute_in_check();
@@ -338,23 +351,171 @@ int Position::see(Move m) const {
     return gain[0] - SeeValue[type_of(mover)] / 2; // rough approximation
 }
 
-// === do_move / undo_move stubs ===
-// TODO: implement with Zobrist hashing, incremental updates
+// === do_move ===
 
 void Position::do_move(Move m, StateInfo& newSt) {
-    // TODO: full implementation
+    Square from = move_from(m);
+    Square to   = move_to(m);
+    MoveType mt = move_type(m);
+    Piece   pc  = board_[from];
+    Piece   cap = (mt == EN_PASSANT) ? make_piece(~sideToMove_, PAWN) : board_[to];
+
+    // Copy state
+    newSt.castling      = st_->castling;
+    newSt.epSquare      = SQ_NONE;
+    newSt.halfmoveClock = st_->halfmoveClock + 1;
+    newSt.fullmoveNumber = st_->fullmoveNumber + (sideToMove_ == BLACK);
+    newSt.captured      = cap;
+    newSt.previous      = st_;
+    newSt.pawnKey        = st_->pawnKey;
+    newSt.psqMG          = st_->psqMG;
+    newSt.psqEG          = st_->psqEG;
+    newSt.gamePhase      = st_->gamePhase;
+
+    // Incremental Zobrist
+    U64 h = st_->key;
+    h ^= Zobrist::side;
+    if (st_->epSquare != SQ_NONE)
+        h ^= Zobrist::enpassant[file_of(st_->epSquare)];
+    h ^= Zobrist::castling[st_->castling];
+
+    // Capture
+    if (cap != NO_PIECE) {
+        Square capSq = to;
+        if (mt == EN_PASSANT)
+            capSq = make_square(file_of(to), rank_of(from));
+        h ^= Zobrist::psq[cap][capSq];
+        if (type_of(cap) == PAWN)
+            newSt.pawnKey ^= Zobrist::psq[cap][capSq];
+        remove_piece(capSq);
+        newSt.halfmoveClock = 0;
+    }
+
+    // Pawn move resets clock
+    if (type_of(pc) == PAWN)
+        newSt.halfmoveClock = 0;
+
+    // Castling — move rook
+    if (mt == CASTLING) {
+        Square rookFrom, rookTo;
+        if (to > from) { // Kingside
+            rookFrom = make_square(7, rank_of(from));
+            rookTo   = make_square(5, rank_of(from));
+        } else { // Queenside
+            rookFrom = make_square(0, rank_of(from));
+            rookTo   = make_square(3, rank_of(from));
+        }
+        Piece rook = make_piece(sideToMove_, ROOK);
+        h ^= Zobrist::psq[rook][rookFrom] ^ Zobrist::psq[rook][rookTo];
+        move_piece(rookFrom, rookTo);
+    }
+
+    // Move piece
+    h ^= Zobrist::psq[pc][from] ^ Zobrist::psq[pc][to];
+    if (type_of(pc) == PAWN)
+        newSt.pawnKey ^= Zobrist::psq[pc][from] ^ Zobrist::psq[pc][to];
+    move_piece(from, to);
+
+    // Promotion
+    if (mt == PROMOTION) {
+        Piece promoPc = make_piece(sideToMove_, promo_type(m));
+        h ^= Zobrist::psq[pc][to] ^ Zobrist::psq[promoPc][to];
+        newSt.pawnKey ^= Zobrist::psq[pc][to];
+        remove_piece(to);
+        put_piece(promoPc, to);
+    }
+
+    // En passant square
+    if (type_of(pc) == PAWN && std::abs(rank_of(to) - rank_of(from)) == 2) {
+        newSt.epSquare = make_square(file_of(from), (rank_of(from) + rank_of(to)) / 2);
+    }
+
+    // Update castling rights
+    newSt.castling &= castling_loss[from];
+    newSt.castling &= castling_loss[to];
+
+    // Finalize hash
+    h ^= Zobrist::castling[newSt.castling];
+    if (newSt.epSquare != SQ_NONE)
+        h ^= Zobrist::enpassant[file_of(newSt.epSquare)];
+    newSt.key = h;
+
+    st_ = &newSt;
+    sideToMove_ = ~sideToMove_;
+    st_->inCheck = compute_in_check();
 }
+
+// === undo_move ===
 
 void Position::undo_move(Move m) {
-    // TODO: full implementation
+    sideToMove_ = ~sideToMove_;
+
+    Square from = move_from(m);
+    Square to   = move_to(m);
+    MoveType mt = move_type(m);
+
+    // Undo promotion
+    if (mt == PROMOTION) {
+        remove_piece(to);
+        put_piece(make_piece(sideToMove_, PAWN), to);
+    }
+
+    // Undo castling — move rook back
+    if (mt == CASTLING) {
+        Square rookFrom, rookTo;
+        if (to > from) {
+            rookFrom = make_square(7, rank_of(from));
+            rookTo   = make_square(5, rank_of(from));
+        } else {
+            rookFrom = make_square(0, rank_of(from));
+            rookTo   = make_square(3, rank_of(from));
+        }
+        move_piece(rookTo, rookFrom);
+    }
+
+    // Move piece back
+    move_piece(to, from);
+
+    // Restore capture
+    Piece cap = st_->captured;
+    if (cap != NO_PIECE) {
+        Square capSq = to;
+        if (mt == EN_PASSANT)
+            capSq = make_square(file_of(to), rank_of(from));
+        put_piece(cap, capSq);
+    }
+
+    // Restore state
+    st_ = st_->previous;
 }
 
+// === Null move ===
+
 void Position::do_null_move(StateInfo& newSt) {
-    // TODO
+    newSt.castling      = st_->castling;
+    newSt.halfmoveClock = st_->halfmoveClock + 1;
+    newSt.fullmoveNumber = st_->fullmoveNumber + (sideToMove_ == BLACK);
+    newSt.captured      = NO_PIECE;
+    newSt.previous      = st_;
+    newSt.pawnKey        = st_->pawnKey;
+    newSt.psqMG          = st_->psqMG;
+    newSt.psqEG          = st_->psqEG;
+    newSt.gamePhase      = st_->gamePhase;
+
+    U64 h = st_->key ^ Zobrist::side;
+    if (st_->epSquare != SQ_NONE)
+        h ^= Zobrist::enpassant[file_of(st_->epSquare)];
+    newSt.epSquare = SQ_NONE;
+    newSt.key = h;
+
+    st_ = &newSt;
+    sideToMove_ = ~sideToMove_;
+    st_->inCheck = false;
 }
 
 void Position::undo_null_move() {
-    // TODO
+    sideToMove_ = ~sideToMove_;
+    st_ = st_->previous;
 }
 
 // === UCI move parsing ===
