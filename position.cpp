@@ -294,19 +294,22 @@ bool Position::is_legal(Move m) const {
         return !(attackers_to(to, occupied) & pieces(~us));
     }
 
-    // Non-king move: only illegal if piece is pinned and moves off pin line
-    U64 pinned = 0;
-    U64 sliders = ((pieces(~us, BISHOP) | pieces(~us, QUEEN)) & bishop_attacks(ksq, 0))
-                | ((pieces(~us, ROOK)   | pieces(~us, QUEEN)) & rook_attacks(ksq, 0));
-    while (sliders) {
-        Square slider = pop_lsb(sliders);
-        U64 between = 0; // TODO: between bitboard
-        // Simplified: if piece is between king and slider, it's pinned
-    }
+    // Non-king move: check if king exposed after removing piece from 'from'
+    // Simulate occupied: remove 'from', add 'to', remove captured if any
+    U64 occupied = (pieces() ^ square_bb(from)) | square_bb(to);
+    if (board_[to] != NO_PIECE && color_of(board_[to]) == ~us)
+        occupied &= ~square_bb(to); // will be replaced, but for slider calc occupied has 'to'
+    // Actually 'to' stays occupied (by our piece), so occupied is correct
 
-    // Simplified legality: just check king not in check after move
-    // (slower but correct)
-    return true; // TODO: proper pin detection
+    // Check all enemy attackers on our king through new occupied
+    U64 enemyAttackers = (PawnAttacks[us][ksq] & pieces(~us, PAWN))
+                       | (KnightAttacks[ksq] & pieces(~us, KNIGHT))
+                       | (bishop_attacks(ksq, occupied) & pieces(~us, BISHOP, QUEEN))
+                       | (rook_attacks(ksq, occupied) & pieces(~us, ROOK, QUEEN));
+    // Exclude the captured piece on 'to' (it's removed)
+    enemyAttackers &= ~square_bb(to);
+    // Exclude the piece we just moved from 'from' (if it was enemy — shouldn't be)
+    return !enemyAttackers;
 }
 
 // === Draw detection ===
