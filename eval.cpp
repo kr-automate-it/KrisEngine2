@@ -1477,6 +1477,150 @@ static int passed_rank(const Position& pos, Square sq) {
     return rank_of(sq); // 0=rank1, 6=rank7 for white pawn
 }
 
+// Isolated: pawn with no friendly pawn on adjacent files (14.8 ELO)
+static int isolated(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_PAWN) return 0;
+    int sx = file_of(sq);
+    for (int y = 0; y < 8; y++) {
+        if (sx > 0 && pos.piece_on(make_square(sx - 1, y)) == W_PAWN) return 0;
+        if (sx < 7 && pos.piece_on(make_square(sx + 1, y)) == W_PAWN) return 0;
+    }
+    return 1;
+}
+
+// Opposed: enemy pawn on same file ahead (prevents advancing)
+static int opposed(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_PAWN) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    for (int y = sy - 1; y >= 0; y--) {
+        if (pos.piece_on(make_square(sx, y)) == B_PAWN) return 1;
+    }
+    return 0;
+}
+
+// Phalanx: friendly pawn on adjacent file, same rank
+static int phalanx(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_PAWN) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    if (sx > 0 && pos.piece_on(make_square(sx - 1, sy)) == W_PAWN) return 1;
+    if (sx < 7 && pos.piece_on(make_square(sx + 1, sy)) == W_PAWN) return 1;
+    return 0;
+}
+
+// Backward: pawn behind all friendly pawns on adjacent files AND cannot safely advance
+// (enemy pawn attacks the stop square or stop+1 square)
+static int backward(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_PAWN) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+
+    // Check if any friendly pawn on adjacent files at same rank or behind
+    for (int y = sy; y < 8; y++) {
+        if (sx > 0 && pos.piece_on(make_square(sx - 1, y)) == W_PAWN) return 0;
+        if (sx < 7 && pos.piece_on(make_square(sx + 1, y)) == W_PAWN) return 0;
+    }
+
+    // Check if enemy pawn prevents advance
+    if ((sx > 0 && sy >= 2 && pos.piece_on(make_square(sx - 1, sy - 2)) == B_PAWN)
+     || (sx < 7 && sy >= 2 && pos.piece_on(make_square(sx + 1, sy - 2)) == B_PAWN)
+     || (sy >= 1 && pos.piece_on(make_square(sx, sy - 1)) == B_PAWN))
+        return 1;
+
+    return 0;
+}
+
+// Doubled: friendly pawn directly behind AND not supported
+// Only the front pawn of a doubled pair gets this penalty
+static int doubled(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_PAWN) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    // Pawn directly behind
+    if (sy >= 7 || pos.piece_on(make_square(sx, sy + 1)) != W_PAWN) return 0;
+    // Not supported (no friendly pawn diagonally behind)
+    if (sx > 0 && pos.piece_on(make_square(sx - 1, sy + 1)) == W_PAWN) return 0;
+    if (sx < 7 && pos.piece_on(make_square(sx + 1, sy + 1)) == W_PAWN) return 0;
+    return 1;
+}
+
+// Connected: pawn is supported or phalanx (29 ELO)
+static int connected(const Position& pos, Square sq) {
+    if (supported(pos, sq) || phalanx(pos, sq)) return 1;
+    return 0;
+}
+
+// Connected bonus: bonus for connected pawns based on rank, phalanx, supported, opposed
+static int connected_bonus(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (!connected(pos, sq)) return 0;
+    static const int seed[] = {0, 7, 8, 12, 29, 48, 86};
+    int r = rank_of(sq); // 0-indexed, white pawn: rank 1=0, rank 7=6
+    if (r < 1 || r > 6) return 0;
+    int op = opposed(pos, sq);
+    int ph = phalanx(pos, sq);
+    int su = supported(pos, sq);
+    return seed[r] * (2 + ph - op) + 21 * su;
+}
+
+// Weak unopposed pawn: isolated or backward AND not opposed
+static int weak_unopposed_pawn(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (opposed(pos, sq)) return 0;
+    if (isolated(pos, sq) || backward(pos, sq)) return 1;
+    return 0;
+}
+
+// Weak lever: unsupported pawn attacked by TWO enemy pawns
+static int weak_lever(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_PAWN) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    // Attacked by both enemy pawns diagonally
+    if (!(sx > 0 && sy > 0 && pos.piece_on(make_square(sx - 1, sy - 1)) == B_PAWN)) return 0;
+    if (!(sx < 7 && sy > 0 && pos.piece_on(make_square(sx + 1, sy - 1)) == B_PAWN)) return 0;
+    // Not supported by our pawns
+    if (sx > 0 && sy < 7 && pos.piece_on(make_square(sx - 1, sy + 1)) == W_PAWN) return 0;
+    if (sx < 7 && sy < 7 && pos.piece_on(make_square(sx + 1, sy + 1)) == W_PAWN) return 0;
+    return 1;
+}
+
+// Blocked: bonus for pawn blocked by enemy pawn on 5th or 6th rank
+// Returns 2 for 5th rank, 1 for 6th rank (from white perspective)
+static int blocked_pawn(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_PAWN) return 0;
+    int sy = rank_of(sq);
+    // 5th rank = index 4, 6th rank = index 5 (from white's view)
+    // In JS code: y==2 (rank 6) or y==3 (rank 5), returns 4-y
+    // Our 0-indexed: rank 4 (5th) or rank 5 (6th)
+    if (sy != 4 && sy != 5) return 0;
+    int sx = file_of(sq);
+    if (sy > 0 && pos.piece_on(make_square(sx, sy - 1)) != B_PAWN) return 0;
+    // Higher rank = lower bonus (5th=2, 6th=1)
+    return (sy == 4) ? 2 : 1;
+}
+
+// Doubled isolated: isolated pawn with another friendly pawn behind,
+// stopped by enemy pawn on same file, no enemy pawns on adjacent files
+static int doubled_isolated(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (pos.piece_on(sq) != W_PAWN) return 0;
+    if (!isolated(pos, sq)) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    int obe = 0, eop = 0, ene = 0;
+    for (int y = 0; y < 8; y++) {
+        if (y > sy && pos.piece_on(make_square(sx, y)) == W_PAWN) obe++;   // our pawn behind
+        if (y < sy && pos.piece_on(make_square(sx, y)) == B_PAWN) eop++;   // enemy pawn ahead
+        if (sx > 0 && pos.piece_on(make_square(sx - 1, y)) == B_PAWN) ene++;
+        if (sx < 7 && pos.piece_on(make_square(sx + 1, y)) == B_PAWN) ene++;
+    }
+    if (obe > 0 && ene == 0 && eop > 0) return 1;
+    return 0;
+}
+
 // === Sub-components (TODO: implement each) ===
 
 // Piece value bonus: material values (Stockfish classical)
@@ -1576,7 +1720,26 @@ static int psqt_mg(const Position& pos) {
     return v;
 }
 // imbalance_total — defined above
-static int pawns_mg(const Position& pos) { return 0; }       // TODO
+// Pawns MG: pawn structure evaluation for middlegame
+static int pawns_mg(const Position& pos) {
+    static const int blockedBonus[] = {0, -11, -3};
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Square s = Square(sq);
+        if (pos.piece_on(s) != W_PAWN) continue;
+
+        if (doubled_isolated(pos, s))       v -= 11;
+        else if (isolated(pos, s))           v -= 5;
+        else if (backward(pos, s))           v -= 9;
+
+        v -= doubled(pos, s) * 11;
+        if (connected(pos, s))
+            v += connected_bonus(pos, s);
+        v -= 13 * weak_unopposed_pawn(pos, s);
+        v += blockedBonus[blocked_pawn(pos, s)];
+    }
+    return v;
+}
 static int pieces_mg(const Position& pos) { return 0; }      // TODO
 // Mobility bonus tables indexed by [piece_type][mobility_count]
 static const int MobilityBonusMG[4][28] = {
@@ -1735,7 +1898,30 @@ static int psqt_eg(const Position& pos) {
     }
     return v;
 }
-static int pawns_eg(const Position& pos) { return 0; }       // TODO
+// Pawns EG: pawn structure evaluation for endgame
+// Heavier penalties, connected bonus scaled by rank, weak lever penalty
+static int pawns_eg(const Position& pos) {
+    static const int blockedBonus[] = {0, -4, 4};
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Square s = Square(sq);
+        if (pos.piece_on(s) != W_PAWN) continue;
+
+        if (doubled_isolated(pos, s))       v -= 56;
+        else if (isolated(pos, s))           v -= 15;
+        else if (backward(pos, s))           v -= 24;
+
+        v -= doubled(pos, s) * 56;
+        if (connected(pos, s)) {
+            int r = rank_of(s); // 0-indexed
+            v += connected_bonus(pos, s) * (r - 2) / 4; // scale by rank
+        }
+        v -= 27 * weak_unopposed_pawn(pos, s);
+        v -= 56 * weak_lever(pos, s);
+        v += blockedBonus[blocked_pawn(pos, s)];
+    }
+    return v;
+}
 static int pieces_eg(const Position& pos) { return 0; }      // TODO
 // Mobility EG
 static int mobility_eg(const Position& pos) {
