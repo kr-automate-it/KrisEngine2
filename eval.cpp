@@ -2419,7 +2419,58 @@ static int king_mg(const Position& pos) {
     v += 17 * pawnless_flank(pos);
     return v;
 }
-static int winnable_total_mg(const Position& pos, int v) { return 0; } // TODO
+// Winnable: second-order correction based on position characteristics
+static int winnable(const Position& pos) {
+    int pawns = 0;
+    int kx[2] = {0, 0}, ky[2] = {0, 0};
+    int flanks[2] = {0, 0};
+
+    for (int x = 0; x < 8; x++) {
+        int open[2] = {0, 0};
+        for (int y = 0; y < 8; y++) {
+            Piece p = pos.piece_on(make_square(x, y));
+            if (type_of(p) == PAWN) {
+                open[color_of(p) == WHITE ? 0 : 1] = 1;
+                pawns++;
+            }
+            if (type_of(p) == KING) {
+                int ci = (color_of(p) == WHITE) ? 0 : 1;
+                kx[ci] = x;
+                ky[ci] = y;
+            }
+        }
+        if (open[0] + open[1] > 0)
+            flanks[x < 4 ? 0 : 1] = 1;
+    }
+
+    // TODO: candidate_passed for black (needs colorflip)
+    int passedCount = candidate_passed_total(pos); // white only, simplified
+    int bothFlanks = (flanks[0] && flanks[1]) ? 1 : 0;
+    int outflanking = std::abs(kx[0] - kx[1]) - std::abs(ky[0] - ky[1]);
+    int purePawn = (non_pawn_material(pos, WHITE) + non_pawn_material(pos, BLACK) == 0) ? 1 : 0;
+    int almostUnwinnable = (outflanking < 0 && !bothFlanks) ? 1 : 0;
+    int infiltration = (ky[0] < 4 || ky[1] > 3) ? 1 : 0;
+
+    return 9 * passedCount
+         + 12 * pawns
+         + 9 * outflanking
+         + 21 * bothFlanks
+         + 24 * infiltration
+         + 51 * purePawn
+         - 43 * almostUnwinnable
+         - 110;
+}
+
+// Winnable total MG: adjusts MG eval based on complexity
+// v = current MG eval (before winnable)
+static int winnable_total_mg(const Position& pos, int v) {
+    int w = winnable(pos);
+    // Clamp: if eval and winnable have same sign, apply; otherwise reduce
+    if (v > 0)
+        return std::max(w, -std::abs(v)) * std::abs(v) / 256;
+    else
+        return std::min(w, std::abs(v)) * std::abs(v) / 256;
+}
 
 // Middle game evaluation — all MG terms combined
 // Each term computed for white, then subtracted for black (colorflip).
@@ -2612,7 +2663,14 @@ static int king_eg(const Position& pos) {
     v += king_danger(pos) / 16;           // linear (not quadratic) in EG
     return v;
 }
-static int winnable_total_eg(const Position& pos, int v) { return 0; } // TODO
+// Winnable total EG: adjusts EG eval based on complexity
+static int winnable_total_eg(const Position& pos, int v) {
+    int w = winnable(pos);
+    if (v > 0)
+        return std::max(w, -std::abs(v)) * std::abs(v) / 256;
+    else
+        return std::min(w, std::abs(v)) * std::abs(v) / 256;
+}
 
 // End game evaluation — all EG terms combined
 // Same structure as MG but no space term, different weights
