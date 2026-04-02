@@ -2140,7 +2140,194 @@ static int mobility_mg(const Position& pos) {
     }
     return v;
 }
-static int threats_mg(const Position& pos) { return 0; }     // TODO
+// === Threat sub-terms ===
+
+// Safe pawn: our pawn that is defended or not attacked
+static int safe_pawn(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    if (sx < 0 || sx > 7 || sy < 0 || sy > 7) return 0;
+    if (pos.piece_on(sq) != W_PAWN) return 0;
+    if (attack(pos, sq)) return 1;       // defended by our pieces
+    // TODO: check if not attacked by enemy (needs colorflip)
+    // Simplified: assume safe if defended
+    return 0;
+}
+
+// Threat safe pawn: enemy non-pawn pieces attacked by our safe pawn (14.95 ELO)
+static int threat_safe_pawn(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    Piece p = pos.piece_on(sq);
+    if (p == NO_PIECE || color_of(p) != BLACK) return 0;
+    PieceType pt = type_of(p);
+    if (pt < KNIGHT || pt > QUEEN) return 0;
+    // Must be attacked by our pawn
+    if (!pawn_attack(pos, sq)) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    // At least one attacking pawn must be safe
+    if (sx > 0 && sy < 7 && safe_pawn(pos, make_square(sx - 1, sy + 1))) return 1;
+    if (sx < 7 && sy < 7 && safe_pawn(pos, make_square(sx + 1, sy + 1))) return 1;
+    return 0;
+}
+
+// Weak enemies: enemy pieces not defended by pawn or defended only weakly
+static int weak_enemies(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    Piece p = pos.piece_on(sq);
+    if (p == NO_PIECE || color_of(p) != BLACK) return 0;
+    if (!attack(pos, sq)) return 0; // must be attacked by us
+    // Check if defended by enemy pawn
+    int sx = file_of(sq), sy = rank_of(sq);
+    if (sx > 0 && sy < 7 && pos.piece_on(make_square(sx - 1, sy + 1)) == B_PAWN) return 0;
+    if (sx < 7 && sy < 7 && pos.piece_on(make_square(sx + 1, sy + 1)) == B_PAWN) return 0;
+    return 1;
+}
+
+// Minor threat: enemy piece attacked by our minor (N/B). Returns piece type index.
+static int minor_threat(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (!weak_enemies(pos, sq)) return 0;
+    Piece p = pos.piece_on(sq);
+    PieceType pt = type_of(p);
+    // Must be attacked by our knight or bishop
+    if (!knight_attack(pos, sq) && !bishop_xray_attack(pos, sq)) return 0;
+    return pt; // PAWN=1, KNIGHT=2, BISHOP=3, ROOK=4, QUEEN=5
+}
+
+// Rook threat: enemy piece attacked by our rook. Returns piece type index.
+static int rook_threat(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    if (!weak_enemies(pos, sq)) return 0;
+    Piece p = pos.piece_on(sq);
+    PieceType pt = type_of(p);
+    if (!rook_xray_attack(pos, sq)) return 0;
+    return pt;
+}
+
+// Hanging: enemy pieces attacked by us and not defended by enemy
+static int hanging_threat(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Piece p = pos.piece_on(Square(sq));
+        if (p == NO_PIECE || color_of(p) != BLACK) continue;
+        if (!attack(pos, Square(sq))) continue;
+        // Check if hanging (not defended) — simplified
+        if (weak_enemies(pos, Square(sq)) && type_of(p) >= KNIGHT) v++;
+    }
+    return v;
+}
+
+// King threat: any enemy piece attacked near their king
+static int king_threat(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        if (!weak_enemies(pos, Square(sq))) continue;
+        if (king_ring(pos, Square(sq))) v++;
+    }
+    return v;
+}
+
+// Pawn push threat: pawn can push and attack enemy piece
+static int pawn_push_threat(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        if (pos.piece_on(Square(sq)) != W_PAWN) continue;
+        int sx = file_of(Square(sq)), sy = rank_of(Square(sq));
+        if (sy <= 0) continue;
+        // Can push? (square ahead empty)
+        if (pos.piece_on(make_square(sx, sy - 1)) != NO_PIECE) continue;
+        // After push, would attack enemy piece?
+        Square pushed = make_square(sx, sy - 1);
+        int px = file_of(pushed), py = rank_of(pushed);
+        if (px > 0 && py > 0) {
+            Piece t = pos.piece_on(make_square(px - 1, py - 1));
+            if (t != NO_PIECE && color_of(t) == BLACK && type_of(t) >= KNIGHT) v++;
+        }
+        if (px < 7 && py > 0) {
+            Piece t = pos.piece_on(make_square(px + 1, py - 1));
+            if (t != NO_PIECE && color_of(t) == BLACK && type_of(t) >= KNIGHT) v++;
+        }
+    }
+    return v;
+}
+
+// Slider on queen: our bishop/rook xraying enemy queen
+static int slider_on_queen(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        if (pos.piece_on(Square(sq)) != B_QUEEN) continue;
+        // Check if our sliders xray this queen through mobility area
+        if (bishop_xray_attack(pos, Square(sq)) && mobility_area(pos, Square(sq))) v++;
+        if (rook_xray_attack(pos, Square(sq)) && mobility_area(pos, Square(sq))) v++;
+    }
+    return v;
+}
+
+// Knight on queen: our knight attacking squares near enemy queen
+static int knight_on_queen(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        if (pos.piece_on(Square(sq)) != B_QUEEN) continue;
+        // Check adjacent squares for our knight attacks
+        int qx = file_of(Square(sq)), qy = rank_of(Square(sq));
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                int nx = qx + dx, ny = qy + dy;
+                if (nx < 0 || nx > 7 || ny < 0 || ny > 7) continue;
+                if (knight_attack(pos, make_square(nx, ny)) && mobility_area(pos, make_square(nx, ny)))
+                    v++;
+            }
+        }
+    }
+    return v;
+}
+
+// Restricted: our pieces attacked by enemy piece of lesser value
+static int restricted(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Piece p = pos.piece_on(Square(sq));
+        if (p == NO_PIECE || color_of(p) != BLACK) continue;
+        // Does this black piece attack any white piece and is it protected?
+        // Simplified: count squares attacked by enemy but also by us
+        if (attack(pos, Square(sq)) && pawn_attack(pos, Square(sq)) == 0) v++;
+    }
+    return std::max(0, v - 4); // approximate
+}
+
+// Weak queen protection: enemy pieces defended only by their queen
+static int weak_queen_protection(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        if (!weak_enemies(pos, Square(sq))) continue;
+        // Defended by queen only?
+        if (queen_attack(pos, Square(sq))) v++; // simplified
+    }
+    return v;
+}
+
+// Threats MG: combine all threat terms
+static int threats_mg(const Position& pos) {
+    static const int minorThreatBonus[] = {0, 5, 57, 77, 88, 79, 0};
+    static const int rookThreatBonus[]  = {0, 3, 37, 42, 0, 58, 0};
+    int v = 0;
+    v += 69 * hanging_threat(pos);
+    v += (king_threat(pos) > 0 ? 24 : 0);
+    v += 48 * pawn_push_threat(pos);
+    v += 173 * threat_safe_pawn(pos);
+    v += 60 * slider_on_queen(pos);
+    v += 16 * knight_on_queen(pos);
+    v += 7 * restricted(pos);
+    v += 14 * weak_queen_protection(pos);
+    for (int sq = 0; sq < 64; sq++) {
+        Square s = Square(sq);
+        int mt = minor_threat(pos, s);
+        if (mt >= 0 && mt <= 6) v += minorThreatBonus[mt];
+        int rt = rook_threat(pos, s);
+        if (rt >= 0 && rt <= 6) v += rookThreatBonus[rt];
+    }
+    return v;
+}
 // Passed MG: rank bonus + block bonus - file penalty
 static int passed_mg(const Position& pos) {
     static const int RankBonus[] = {0, 10, 17, 15, 62, 168, 276};
@@ -2155,7 +2342,72 @@ static int passed_mg(const Position& pos) {
     }
     return v;
 }
-static int space(const Position& pos) { return 0; }          // TODO
+// Space area: safe central squares for minor pieces (ranks 2-4, files c-f)
+// Counted twice if behind our pawn and not attacked by enemy
+static int space_area(const Position& pos, Square sq) {
+    if (sq == SQ_NONE) return 0;
+    int r = rank_of(sq) + 1; // 1-indexed rank
+    int f = file_of(sq) + 1; // 1-indexed file
+    if (r < 2 || r > 4 || f < 3 || f > 6) return 0;
+    int sx = file_of(sq), sy = rank_of(sq);
+    if (pos.piece_on(sq) == W_PAWN) return 0;
+    // Not attacked by enemy pawns
+    if (sx > 0 && sy > 0 && pos.piece_on(make_square(sx - 1, sy - 1)) == B_PAWN) return 0;
+    if (sx < 7 && sy > 0 && pos.piece_on(make_square(sx + 1, sy - 1)) == B_PAWN) return 0;
+
+    int v = 1;
+    // Doubled if behind our pawn (1-3 squares) and not attacked by enemy
+    bool behindPawn = false;
+    for (int d = 1; d <= 3; d++) {
+        if (sy - d >= 0 && pos.piece_on(make_square(sx, sy - d)) == W_PAWN) {
+            behindPawn = true;
+            break;
+        }
+    }
+    if (behindPawn) {
+        // TODO: check enemy attack on this square (needs colorflip)
+        // Simplified: assume not attacked
+        v++;
+    }
+    return v;
+}
+
+// Space: space evaluation weighted by piece count and blocked pawns
+// weight = pieceCount - 3 + min(blockedCount, 9)
+// Only when total NPM >= 12222
+static int space(const Position& pos) {
+    if (non_pawn_material(pos, WHITE) + non_pawn_material(pos, BLACK) < 12222) return 0;
+
+    int pieceCount = 0, blockedCount = 0;
+    for (int sq = 0; sq < 64; sq++) {
+        Piece p = pos.piece_on(Square(sq));
+        if (p != NO_PIECE && color_of(p) == WHITE) pieceCount++;
+        int sx = file_of(Square(sq)), sy = rank_of(Square(sq));
+        // Blocked white pawn: enemy pawn directly ahead, or two enemy pawns diag-2 ahead
+        if (p == W_PAWN && sy > 0) {
+            if (pos.piece_on(make_square(sx, sy - 1)) == B_PAWN) blockedCount++;
+            else if (sy > 1
+                     && sx > 0 && pos.piece_on(make_square(sx - 1, sy - 2)) == B_PAWN
+                     && sx < 7 && pos.piece_on(make_square(sx + 1, sy - 2)) == B_PAWN)
+                blockedCount++;
+        }
+        // Blocked black pawn (symmetric)
+        if (p == B_PAWN && sy < 7) {
+            if (pos.piece_on(make_square(sx, sy + 1)) == W_PAWN) blockedCount++;
+            else if (sy < 6
+                     && sx > 0 && pos.piece_on(make_square(sx - 1, sy + 2)) == W_PAWN
+                     && sx < 7 && pos.piece_on(make_square(sx + 1, sy + 2)) == W_PAWN)
+                blockedCount++;
+        }
+    }
+
+    int area = 0;
+    for (int sq = 0; sq < 64; sq++)
+        area += space_area(pos, Square(sq));
+
+    int weight = pieceCount - 3 + std::min(blockedCount, 9);
+    return area * weight * weight / 16;
+}
 // King MG: shelter, storm, danger², flank attack, pawnless flank
 static int king_mg(const Position& pos) {
     int v = 0;
@@ -2315,7 +2567,27 @@ static int mobility_eg(const Position& pos) {
     }
     return v;
 }
-static int threats_eg(const Position& pos) { return 0; }     // TODO
+// Threats EG
+static int threats_eg(const Position& pos) {
+    static const int minorThreatBonus[] = {0, 32, 41, 56, 119, 161, 0};
+    static const int rookThreatBonus[]  = {0, 46, 68, 60, 38, 41, 0};
+    int v = 0;
+    v += 36 * hanging_threat(pos);
+    v += (king_threat(pos) > 0 ? 89 : 0);
+    v += 39 * pawn_push_threat(pos);
+    v += 94 * threat_safe_pawn(pos);
+    v += 18 * slider_on_queen(pos);
+    v += 11 * knight_on_queen(pos);
+    v += 7 * restricted(pos);
+    for (int sq = 0; sq < 64; sq++) {
+        Square s = Square(sq);
+        int mt = minor_threat(pos, s);
+        if (mt >= 0 && mt <= 6) v += minorThreatBonus[mt];
+        int rt = rook_threat(pos, s);
+        if (rt >= 0 && rt <= 6) v += rookThreatBonus[rt];
+    }
+    return v;
+}
 // Passed EG: king proximity + rank bonus + block bonus - file penalty
 static int passed_eg(const Position& pos) {
     static const int RankBonus[] = {0, 28, 33, 41, 72, 177, 260};
