@@ -1,6 +1,8 @@
 #pragma once
 #include "position.h"
 
-// TODO: move generation
+// Generate all pseudo-legal moves
 void generate_moves(const Position& pos, MoveList& list);
+
+// Generate only capture moves (for quiescence search)
 void generate_captures(const Position& pos, MoveList& list);
