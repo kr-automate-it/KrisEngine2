@@ -1,0 +1,12 @@
+/c/msys64/ucrt64/bin/g++ -std=c++20 -O3 -march=native -flto -DNDEBUG -c -o main.o main.cpp
+/c/msys64/ucrt64/bin/g++ -std=c++20 -O3 -march=native -flto -DNDEBUG -c -o bitboard.o bitboard.cpp
+/c/msys64/ucrt64/bin/g++ -std=c++20 -O3 -march=native -flto -DNDEBUG -c -o position.o position.cpp
+/c/msys64/ucrt64/bin/g++ -std=c++20 -O3 -march=native -flto -DNDEBUG -c -o movegen.o movegen.cpp
+/c/msys64/ucrt64/bin/g++ -std=c++20 -O3 -march=native -flto -DNDEBUG -c -o eval.o eval.cpp
+/c/msys64/ucrt64/bin/g++ -std=c++20 -O3 -march=native -flto -DNDEBUG -c -o search.o search.cpp
+/c/msys64/ucrt64/bin/g++ -std=c++20 -O3 -march=native -flto -DNDEBUG -c -o uci.o uci.cpp
+/c/msys64/ucrt64/bin/g++ -std=c++20 -O3 -march=native -flto -DNDEBUG -c -o tt.o tt.cpp
+/c/msys64/ucrt64/bin/g++ -std=c++20 -O3 -march=native -flto -DNDEBUG -c -o zobrist.o zobrist.cpp
+/c/msys64/ucrt64/bin/g++ -std=c++20 -O3 -march=native -flto -DNDEBUG -o engine.exe main.o bitboard.o position.o movegen.o eval.o search.o uci.o tt.o zobrist.o -lpthread -static
+lto-wrapper.exe: warning: using serial compilation of 2 LTRANS jobs
+lto-wrapper.exe: note: see the '-flto' option documentation for more information

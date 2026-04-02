@@ -2,6 +2,13 @@
 
 namespace Eval {
 
+// === Forward declarations ===
+static int queen_count(const Position& pos, Color c);
+static int non_pawn_material(const Position& pos, Color c);
+static int mobility_mg(const Position& pos);
+static int threat_safe_pawn(const Position& pos, Square sq);
+static int threat_safe_pawn_total(const Position& pos);
+
 // === Helper functions ===
 
 // Pinned direction: detects if a piece on 'sq' is a blocker for a king.
@@ -2412,6 +2419,13 @@ static int weak_queen_protection(const Position& pos) {
     return v;
 }
 
+static int threat_safe_pawn_total(const Position& pos) {
+    int v = 0;
+    for (int sq = 0; sq < 64; sq++)
+        v += threat_safe_pawn(pos, Square(sq));
+    return v;
+}
+
 // Threats MG: combine all threat terms
 static int threats_mg(const Position& pos) {
     static const int minorThreatBonus[] = {0, 5, 57, 77, 88, 79, 0};
@@ -2420,7 +2434,7 @@ static int threats_mg(const Position& pos) {
     v += 69 * hanging_threat(pos);
     v += (king_threat(pos) > 0 ? 24 : 0);
     v += 48 * pawn_push_threat(pos);
-    v += 173 * threat_safe_pawn(pos);
+    v += 173 * threat_safe_pawn_total(pos);
     v += 60 * slider_on_queen(pos);
     v += 16 * knight_on_queen(pos);
     v += 7 * restricted(pos);
@@ -2731,7 +2745,7 @@ static int threats_eg(const Position& pos) {
     v += 36 * hanging_threat(pos);
     v += (king_threat(pos) > 0 ? 89 : 0);
     v += 39 * pawn_push_threat(pos);
-    v += 94 * threat_safe_pawn(pos);
+    v += 94 * threat_safe_pawn_total(pos);
     v += 18 * slider_on_queen(pos);
     v += 11 * knight_on_queen(pos);
     v += 7 * restricted(pos);
