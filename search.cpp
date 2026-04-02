@@ -100,7 +100,7 @@ static int quiescence(Position& pos, int alpha, int beta, SearchInfo& info, int 
     info.nodes.fetch_add(1, std::memory_order_relaxed);
 
     bool inCheck = pos.in_check();
-    if (ply > 64) return Eval::evaluate(pos);
+    if (ply > 50) return Eval::evaluate(pos);
 
     // TT probe
     Move ttMove = MOVE_NONE;
@@ -145,12 +145,10 @@ static int quiescence(Position& pos, int alpha, int beta, SearchInfo& info, int 
         if (!pos.is_legal(m)) continue;
 
         if (!inCheck) {
-            // Delta pruning
             Piece cap = pos.piece_on(move_to(m));
             if (cap != NO_PIECE && stand_pat + PieceValue[type_of(cap)] + 250 < alpha
                 && move_type(m) != PROMOTION)
                 continue;
-            // SEE pruning
             if (pos.see(m) < 0) continue;
         }
 
@@ -199,7 +197,7 @@ static int alpha_beta(Position& pos, int depth, int alpha, int beta,
     bool inCheck = pos.in_check();
 
     // Hard ply limit — prevent stack overflow from extensions
-    if (ply >= 127) return Eval::evaluate(pos);
+    if (ply >= 64) return Eval::evaluate(pos);
 
     // Qsearch at leaf
     if (depth <= 0) return quiescence(pos, alpha, beta, info, ply);
