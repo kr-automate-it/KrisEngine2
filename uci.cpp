@@ -35,6 +35,12 @@ static void parse_go(std::istringstream& is) {
 
     searchInfo.maxDepth = depth;
 
+    // Debug: log go parameters
+    std::cerr << "go: wtime=" << wtime << " btime=" << btime
+              << " winc=" << winc << " binc=" << binc
+              << " depth=" << depth << " movetime=" << movetime
+              << " stm=" << (pos.side_to_move() == WHITE ? "w" : "b") << std::endl;
+
     if (movetime > 0) {
         searchInfo.timeLimit = movetime;
     } else if (!infinite && (wtime > 0 || btime > 0)) {
@@ -55,8 +61,10 @@ static void parse_go(std::istringstream& is) {
             searchInfo.timeLimit = std::max((int64_t)10, maxTime);
         if (searchInfo.timeLimit > timeLeft - 50)
             searchInfo.timeLimit = std::max((int64_t)10, (int64_t)(timeLeft - 50));
+        std::cerr << "timeLimit=" << searchInfo.timeLimit << "ms" << std::endl;
     } else {
         searchInfo.timeLimit = 0;
+        std::cerr << "timeLimit=0 (infinite)" << std::endl;
     }
 
     // Stop previous search
