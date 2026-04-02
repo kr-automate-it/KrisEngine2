@@ -50,11 +50,11 @@ static bool time_up(SearchInfo& info) {
     if (info.stopped.load(std::memory_order_relaxed)) return true;
     if (info.timeLimit <= 0) return false;
 
-    // Check clock periodically — balance speed vs responsiveness
-    static thread_local int64_t nextCheck = 0;
+    // Check clock every 1024 nodes
     int64_t nodes = info.nodes.load(std::memory_order_relaxed);
-    if (nodes < nextCheck) return false;
-    nextCheck = nodes + 1;
+    if (nodes & 1023) return false;
+    // Debug: log every time we actually check
+    static thread_local int64_t lastLog = 0;
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - info.startTime).count();
@@ -459,7 +459,7 @@ SearchResult search(Position& pos, SearchInfo& info) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - info.startTime).count();
 
-            // Simple: don't start new depth after using > 3% of time
+            // Don't start new depth after using > 30% of time per move
             if (info.timeLimit > 0 && elapsed > info.timeLimit / 30) break;
             // No time limit: max 30 seconds total
             if (info.timeLimit <= 0 && elapsed > 30000) break;
